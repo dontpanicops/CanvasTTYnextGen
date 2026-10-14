@@ -14,6 +14,7 @@ import type {
   PluginUpdateStatus
 } from "../../../../shared/contracts";
 import { t, type TranslationKey } from "../../lib/i18n";
+import { copyKey, useCopy } from "../../lib/useCopy";
 import { INSTALLED_PAGE_SIZE, SHOWCASE_PAGE_SIZE, clampPage, pageCount, paginate } from "./pluginPagination";
 import { compareSemver } from "../../../../shared/hostVersion";
 import { UiIcon } from "../../components/UiIcon";
@@ -171,7 +172,7 @@ export function PluginSettingsSection({
   }, [showcaseTotal]);
   const [githubCode, setGithubCode] = useState<GithubDeviceFlowStart | null>(null);
   const [githubBusy, setGithubBusy] = useState(false);
-  const [codeCopied, setCodeCopied] = useState(false);
+  const [codeCopied, copyCode] = useCopy(1600);
   const [showcasePreviews, setShowcasePreviews] = useState<Record<string, PluginInstallPreview>>({});
   const [showcaseManifests, setShowcaseManifests] = useState<Record<string, PluginManifest>>({});
   const [selectedShowcase, setSelectedShowcase] = useState<string | null>(null);
@@ -326,9 +327,7 @@ export function PluginSettingsSection({
   };
 
   const copyGithubCode = (code: string): void => {
-    window.canvasTTY.clipboard.writeText(code);
-    setCodeCopied(true);
-    window.setTimeout(() => setCodeCopied(false), 1600);
+    void copyCode(code);
   };
 
   const openGithubAuthorization = async (
@@ -860,7 +859,7 @@ export function PluginSettingsSection({
               }}
             >
               {t(locale, "githubAuthCode")}: <strong>{githubCode.userCode}</strong>
-              {codeCopied && <span className="plugin-github-copied">{t(locale, "githubAuthCopied")}</span>}
+              {codeCopied !== "idle" && <span className="plugin-github-copied">{t(locale, copyKey(codeCopied, "githubAuthCopied", "githubAuthCopied"))}</span>}
             </p>
             <div className="plugin-github-flow-actions">
               <button type="button" disabled={githubBusy} onClick={() => void openGithubAuthorization(githubCode, "embedded")}>

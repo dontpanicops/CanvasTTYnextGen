@@ -125,9 +125,9 @@ test("serves on 127.0.0.1", async () => {
   assert.equal(body, "pong");
 });
 `);
-// P5: the layout the commands of 7303d772 read (career-os, cut to a few lines)
+// P5: the layout the commands of 7303d772 read (a working project, cut to a few lines)
 const put = (rel, text) => { fs.mkdirSync(path.dirname(path.join(project, rel)), { recursive: true }); fs.writeFileSync(path.join(project, rel), text); };
-const api = "apps/api/src/career_os";
+const api = "apps/api/src/acme_shop";
 put("apps/api/tests/analysis/test_analysis_api.py", Array.from({ length: 440 }, (_, i) => (i % 7 === 0 ? `def test_market_${i}():` : `    assert ${i} == ${i}  # market snapshot ${i}`)).join("\n") + "\n");
 for (const m of ["service", "models", "schemas", "domain"]) put(`${api}/modules/analysis/${m}.py`, `market_snapshot = None\ndef ${m}():\n    return "market"\n`);
 put(`${api}/modules/analysis/api.py`, `@router.get(\n    "/analysis"\n)\nasync def get_analysis():\n    pass\n`);
@@ -145,9 +145,9 @@ const PROBES = {
   P5: { task: `Run each of these shell commands with the Bash tool, one Bash call per command, exactly as written (do not rewrite them), in this order, then report. Do not change files. done=true if all ran; exitCode: the last one's; note: one word per command, ok or failed.
 1) cd "apps/api" && bash -c '
 sed -n 386,436p tests/analysis/test_analysis_api.py
-grep -niE "market_snapshot|market" src/career_os/modules/analysis/{service,models,schemas,domain}.py | head -20
-grep -rniE "31|legacy|n=2|trend|stale|ttl" src/career_os/providers/market.py | head'
-2) cd "apps/api/src/career_os" && for f in modules/*/api.py; do echo "== $f"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '"/' ; grep -nE '^(async )?def ' $f; done
+grep -niE "market_snapshot|market" src/acme_shop/modules/analysis/{service,models,schemas,domain}.py | head -20
+grep -rniE "31|legacy|n=2|trend|stale|ttl" src/acme_shop/providers/market.py | head'
+2) cd "apps/api/src/acme_shop" && for f in modules/*/api.py; do echo "== $f"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '"/' ; grep -nE '^(async )?def ' $f; done
 3) cd "." && g(){ grep -rniE --include='*.py' --include='*.ts' --exclude-dir=node_modules "$@"; }; echo "## market"; g 'market|snapshot' apps tests | head; echo "## tutor"; g 'tutor' apps | head
 4) cd "." && O="--include=*.py --exclude-dir=node_modules"; echo "## ttl"; grep -rniE $O "ttl|legacy" apps | head -5
 5) git status --short && git log --oneline -3 && git diff --stat
@@ -155,9 +155,9 @@ grep -rniE "31|legacy|n=2|trend|stale|ttl" src/career_os/providers/market.py | h
   P6: { task: `Run each of these shell commands with the Bash tool, one Bash call per command, exactly as written (do not rewrite them), in this order. If a command fails, note it and go on to the next one — do not try it another way. Do not change files. done=true if every command ran; exitCode: the last one's; note: one word per command, ok or failed.
 1) cd "${project}" && cd "apps/api" && bash -c '
 sed -n 386,436p tests/analysis/test_analysis_api.py
-grep -niE "market_snapshot|market" src/career_os/modules/analysis/{service,models,schemas,domain}.py | head -20
-grep -rniE "31|legacy|n=2|trend|stale|ttl" src/career_os/providers/market.py | head'
-2) cd "${project}" && cd "apps/api/src/career_os" && for f in modules/*/api.py; do echo "== $f"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '"/' ; grep -nE '^(async )?def ' $f; done
+grep -niE "market_snapshot|market" src/acme_shop/modules/analysis/{service,models,schemas,domain}.py | head -20
+grep -rniE "31|legacy|n=2|trend|stale|ttl" src/acme_shop/providers/market.py | head'
+2) cd "${project}" && cd "apps/api/src/acme_shop" && for f in modules/*/api.py; do echo "== $f"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '"/' ; grep -nE '^(async )?def ' $f; done
 3) cd "${project}" && g(){ grep -rniE --include='*.py' --include='*.ts' --exclude-dir=node_modules "$@"; }; echo "## market"; g 'market|snapshot' apps tests | head; echo "## tutor"; g 'tutor' apps | head
 4) cd "${project}" && O="--include=*.py --exclude-dir=node_modules"; echo "## ttl"; grep -rniE $O "ttl|legacy" apps | head -5
 5) cd "${project}" && git status --short && git log --oneline -3

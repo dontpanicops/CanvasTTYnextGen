@@ -1,4 +1,4 @@
-# state: PRE-FIX copy of src/ at /private/tmp/claude-501/-Users-dmitrijbernackij-dev-CanvasTTYnextGen/9663f878-addc-4139-b71a-c04731c51650/scratchpad/before/src (prepare.ts sha256 fd068a7f475c8bdaf218060b025fb835b23f43d0f93d05d8ec958f61031c7f39, byte-identical to the working tree's prepare.ts observed at session start); rerun with the extended scenario set
+# state: PRE-FIX copy of src/ at /private/tmp/claude-501/-Users-<user>-dev-CanvasTTYnextGen/9663f878-addc-4139-b71a-c04731c51650/scratchpad/before/src (prepare.ts sha256 fd068a7f475c8bdaf218060b025fb835b23f43d0f93d05d8ec958f61031c7f39, byte-identical to the working tree's prepare.ts observed at session start); rerun with the extended scenario set
 TAP version 13
 # Subtest: bad: function before return -> config_unknown, not ok
 not ok 1 - bad: function before return -> config_unknown, not ok

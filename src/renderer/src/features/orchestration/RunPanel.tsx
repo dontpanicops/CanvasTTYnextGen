@@ -26,6 +26,7 @@ import type {
 } from "../../../../shared/orchestration";
 import { UiIcon } from "../../components/UiIcon";
 import { t, type TranslationKey } from "../../lib/i18n";
+import { copyKey, useCopy } from "../../lib/useCopy";
 import {
   ACTIVE_STATUSES,
   activeRole,
@@ -1000,13 +1001,8 @@ function RunSummary({ orch, runId, view, records, locale, changedFiles, gaps, in
 
 // biome-ignore-start lint/suspicious/noArrayIndexKey: a document's lines are built once, in order, never reordered
 function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" | "result"; locale: LocaleId; onNote?: (markdown: string) => void }): React.JSX.Element {
-  const [copied, setCopied] = useState(false);
+  const [copied, copy] = useCopy();
   const [noted, setNoted] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 2000);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
   useEffect(() => {
     if (!noted) return;
     const timer = window.setTimeout(() => setNoted(false), 2000);
@@ -1032,7 +1028,7 @@ function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" |
   return (
     <article className="orch-doc" data-run-doc={kind}>
       <div className="orch-doc__actions">
-        <button type="button" data-run-doc-copy onClick={() => { void Promise.resolve(window.canvasTTY.clipboard.writeText(md)).then(() => setCopied(true), () => setCopied(false)); }}>{t(locale, copied ? "docCopied" : "docCopy")}</button>
+        <button type="button" data-run-doc-copy onClick={() => copy(md)}>{t(locale, copyKey(copied, "docCopy", "docCopied"))}</button>
         {onNote && <button type="button" data-run-doc-note onClick={() => { onNote(md); setNoted(true); }}>{t(locale, noted ? "docOnCanvas" : "docToCanvas")}</button>}
       </div>
       <h3>{doc.title}</h3>

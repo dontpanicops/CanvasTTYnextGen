@@ -107,12 +107,12 @@ async function run(access, asks) {
   return { m, runId, state, src };
 }
 
-// the commands Claude asked about in run 7303d772 (career-os), as the CLI sent them
+// the commands Claude asked about in run 7303d772 (a working project), as the CLI sent them
 const R1 = `cd "apps/api" && bash -c '
 sed -n 386,436p tests/analysis/test_analysis_api.py
-grep -niE "market_snapshot|market" src/career_os/modules/analysis/{service,models,schemas,domain}.py | head -20
-grep -rniE "31|legacy|n=2|trend|stale|unlicensed|attribution|ttl" src/career_os/providers/market.py | head'`;
-const R2 = `cd "apps/api/src/career_os" && for f in modules/*/api.py; do echo "== $f"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '"/' ; grep -nE '^(async )?def ' $f; done`;
+grep -niE "market_snapshot|market" src/acme_shop/modules/analysis/{service,models,schemas,domain}.py | head -20
+grep -rniE "31|legacy|n=2|trend|stale|unlicensed|attribution|ttl" src/acme_shop/providers/market.py | head'`;
+const R2 = `cd "apps/api/src/acme_shop" && for f in modules/*/api.py; do echo "== $f"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '"/' ; grep -nE '^(async )?def ' $f; done`;
 const R3 = `cd "." && O="--include=*.py --include=*.ts --include=*.tsx --exclude-dir=node_modules --exclude-dir=.next"; echo "## task impact"; grep -rniE $O 'ai_task_impact|task.impact|automation.factor|automation_risk' apps tests | head`;
 const R4 = `cd "." && g(){ grep -rniE --include='*.py' --exclude-dir=node_modules "$@"; }; echo "## tutor"; g 'tutor' apps tests | head`;
 // what Claude 2.1.294 said about them (scripts/claude-workspace-probe.mjs P5, 2026-10-08)
@@ -228,7 +228,7 @@ test("the CLI's reason reaches the request and the feed; the host's own answers 
   const feed = (await m.activity(runId, 0, 500)).value.entries.filter((e) => e.kind.startsWith("permission_"));
   const host = feed.filter((e) => e.kind === "permission_applied" && e.detail.scope === "sandbox_static");
   assert.deepEqual(host.map((e) => [e.detail.reasonType, e.detail.reason]), [["other", VARIABLE.decision_reason], ["subcommandResults", null]]);
-  assert.match(host[0].text, /^Bash: cd "apps\/api\/src\/career_os"/);
+  assert.match(host[0].text, /^Bash: cd "apps\/api\/src\/acme_shop"/);
   const asked = feed.filter((e) => e.kind === "permission_requested");
   assert.deepEqual(asked.map((e) => [e.detail.reasonType, e.detail.reason]), [["other", VARIABLE.decision_reason]]);
   await m.shutdown();

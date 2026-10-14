@@ -977,7 +977,8 @@ export interface CanvasTTYApi {
   };
   clipboard: {
     readText(): Promise<string>;
-    writeText(text: string): void;
+    // true once the main process reads the text back from the clipboard
+    writeText(text: string): Promise<boolean>;
   };
   external: {
     openUrl(url: string): Promise<void>;

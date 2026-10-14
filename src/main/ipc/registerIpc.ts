@@ -115,8 +115,14 @@ export function registerIpc({
   };
 
   handleMain(IPC.clipboardRead, () => clipboard.readText());
-  onMain(IPC.clipboardWrite, (_event, text: string) => {
-    if (typeof text === "string" && text.length > 0) clipboard.writeText(text);
+  handleMain(IPC.clipboardWrite, (_event, text: unknown) => {
+    if (typeof text !== "string" || text.length === 0) return false;
+    try {
+      clipboard.writeText(text);
+      return clipboard.readText() === text;
+    } catch {
+      return false;
+    }
   });
   ipcMain.handle(IPC.externalOpenUrl, (event, value: unknown) => {
     assertMainRenderer(event, getMainWindow);
