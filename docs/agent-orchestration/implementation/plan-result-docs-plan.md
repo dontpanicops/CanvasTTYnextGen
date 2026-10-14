@@ -7,7 +7,15 @@
 
 **Архитектура:** чистые функции в новом `runDocs.ts` строят `RunDoc` (заголовок, разделы, строки). Из `RunDoc` рисуется
 React-вид и собирается markdown. Данные берутся из того, что renderer уже получает: `view`, история журнала, тексты через
-`orch.loadText`, `api().changes` и `api().diff`. Main, журнал и IPC не меняются.
+`orch.loadText`, `api().changes`, `api().diff` и один новый вызов `api().file` — точный текст файла из дерева запуска
+(`git cat-file blob <tree>:<path>` в `control.git` запуска). Журнал не меняется.
+
+**Правки владельца перед кодом (2026-10-14):**
+1. Текст созданного документа — сначала точно из Git (`api().file`, то же дерево, что у вкладки «Изменения»: живой
+   снимок, последняя проверка или последняя контрольная точка). Восстановление из diff — только запасной путь, когда
+   точное чтение не удалось; тогда у файла пометка «восстановлено из изменений». Тесты на оба пути (задача 3б).
+2. «На холст» — снимок. В заметке видно «Копия документа на <дата, время>» и кнопка «Открыть актуальный». После
+   перепланирования снимок на холсте остаётся помеченной копией и не выдаёт себя за текущий план (задача 5).
 
 **Стек:** TypeScript, React, `node --test` (тесты импортируют `.ts` renderer напрямую), Electron smoke через
 `scripts/orchestration-app-kit.mjs`.
@@ -16,12 +24,14 @@ React-вид и собирается markdown. Данные берутся из 
 
 ## Общие ограничения
 
-- Журнал, main, IPC, `settings.json` (формат) не меняются.
+- Журнал не меняется. Main и IPC: только новый вызов `orchestration:file` (чтение, ничего не пишет). `settings.json`:
+  только необязательное поле `source` у заметки; старые версии его отбрасывают, текст заметки остаётся.
 - Агентам ничего нового не поручается. Текст агента всегда помечен «со слов исполнителя» или «со слов лида».
 - Непрочитанное — «загружается…», непрочитанное с ошибкой — «не удалось прочитать». Выдумывать нельзя.
-- Созданные документы: только `added` с расширением `.md`, `.markdown` или `.txt`. Не больше 10. Diff по одному, лимит
-  main 256 КиБ.
-- Заметка: не больше 30 000 символов, кладётся в активное пространство, в центр видимой области.
+- Созданные документы: только `added` с расширением `.md`, `.markdown` или `.txt`. Не больше 10. Чтение по одному
+  файлу, лимит 256 КиБ (и у точного чтения, и у diff).
+- Заметка: не больше 20 000 символов вместе с плашкой снимка и строкой об обрезке (столько хранит `SettingsStore`
+  и пропускает `maxLength` поля заметки), кладётся в активное пространство, в центр видимой области.
 - Строки — на русском и английском (`ru` и `en` в `src/renderer/src/lib/i18n.ts`).
 - Нигде в коде, коммитах и текстах не упоминать, кем или чем сделана работа.
 
@@ -37,14 +47,24 @@ React-вид и собирается markdown. Данные берутся из 
 3. **Запуск журнала v1** (`conditions: null`). «План» и «Результат» без разделов требований. Задачи 2 и 3.
 4. **Копии больше нет** (`api().changes` → ошибка). «Результат» показывает остальное, раздел документов — «не удалось
    прочитать» и «Повторить». Задачи 3 и 4.
-5. **Очень длинный документ на холст.** Заметка обрезана до 30 000 символов, `settings.json` не раздувается. Задачи 1
+5. **Очень длинный документ на холст.** Заметка обрезана до 20 000 символов (с плашкой и строкой об обрезке), `settings.json` не раздувается. Задачи 1
    и 5.
+6. **Точное чтение не удалось, diff есть.** Текст восстановлен из diff и помечен; ни в панели, ни в markdown не
+   выглядит точным. Точное чтение сказало «больше 256 КиБ» или «не текст» — diff не запрашивается. Задачи 1 и 3б.
+7. **Снимок на холсте после перепланирования.** Заметка помнит, откуда она (`source`), всегда показывает «Копия
+   документа на …» и «Открыть актуальный»; кнопка открывает текущую вкладку запуска. Заметка из старой версии без
+   `source` — обычная заметка. Задача 5.
 
 ## Файлы
 
 | Файл | Что |
 |---|---|
-| `src/renderer/src/features/orchestration/runDocs.ts` (новый) | типы `RunDoc`, `planDoc`, `resultDoc`, `toMarkdown`, `noteText`, `addedText`, `pickDocs`, `stageTask` |
+| `src/renderer/src/features/orchestration/runDocs.ts` (новый) | типы `RunDoc`, `planDoc`, `resultDoc`, `toMarkdown`, `noteText`, `addedText`, `pickDocs`, `stageTask`, `readCreatedFile`, `snapshotText` |
+| `src/main/services/orchestration/workspace.ts` | `readTreeFile` — блоб файла из дерева `control.git` |
+| `src/main/services/orchestration/manager.ts` | метод `file(runId, path)` рядом с `diff` |
+| `src/main/ipc/orchestrationIpc.ts`, `src/shared/contracts.ts` (`IPC`), `src/preload/orchestrationClient.ts`, `src/shared/orchestration.ts` | вызов `orchestration:file`, тип `OrchestrationFile` |
+| `src/shared/contracts.ts` (`StickyNote`), `src/main/services/SettingsStore.ts` (`normalizeStickyNotes`) | необязательное `source` у заметки |
+| `src/renderer/src/features/notes/StickyNoteCard.tsx` | плашка «Копия документа на …» и «Открыть актуальный» |
 | `src/renderer/src/features/orchestration/runStatus.ts` | перенос `REVIEWER_WORDS` и новый `saidKey` |
 | `src/renderer/src/features/orchestration/RunPanel.tsx` | `RunDocView`, `RunDocs`, `useCreatedDocs`, вкладки, ссылка «Открыть план», «Открыть результат», проп `onNoteFromText` |
 | `src/renderer/src/features/orchestration/useAgentCanvasUi.ts` | `PanelTab` |
@@ -54,6 +74,7 @@ React-вид и собирается markdown. Данные берутся из 
 | `src/renderer/src/lib/i18n.ts` | строки `doc*`, `orchTab_plan`, `orchTab_result`; новый текст `orchSummaryOpen` |
 | стили панели (файл, где описан `.orch-summary-view`) | `.orch-doc` |
 | `tests/orchestration-run-docs.test.mjs` (новый) | модульные тесты |
+| `tests/orchestration-run-file.test.mjs` (новый), `tests/sticky-notes.test.mjs` или `tests/settings-normalizer.test.mjs` | точное чтение в main; `source` заметки |
 | `scripts/smoke-orchestration-ui.mjs`, `scripts/smoke-board-ui.mjs` | проверки в собранном приложении |
 | `docs/agent-orchestration/implementation/plan-result-docs.md` | правки по итогам (задача 7) |
 
@@ -72,7 +93,7 @@ React-вид и собирается markdown. Данные берутся из 
   - `addedText(diff): { body: string | null; why: "too_large" | "binary" | null }`;
   - `pickDocs(files): { paths: string[]; more: number }`, `MAX_DOCS = 10`;
   - `toMarkdown(doc): string`;
-  - `noteText(markdown, cut): string`, `NOTE_MAX = 30_000`.
+  - `noteText(markdown, cut): string`, `NOTE_MAX = 20_000` (весь текст заметки, с хвостом).
 
 - [ ] **Шаг 1: падающие тесты**
 
@@ -136,11 +157,16 @@ test("toMarkdown: headings, lists with marks, the agent's word marked, no HTML",
   assert.ok(md.endsWith("\n"));
 });
 
+test("toMarkdown: a file with both text and a note says the note before the text", () => {
+  const md = toMarkdown({ title: "T", asOf: "a", sections: [{ heading: "Д", lines: [{ kind: "file", path: "docs/r.md", body: "# R\n", note: "Восстановлено из изменений." }] }] });
+  assert.match(md, /\n### docs\/r\.md\n\n_Восстановлено из изменений\._\n\n# R\n$/);
+});
+
 test("noteText: a long document is cut with a closing line", () => {
   assert.equal(noteText("short", "cut"), "short");
   const long = "x".repeat(NOTE_MAX + 5);
   const got = noteText(long, "… обрезано");
-  assert.equal(got.length, NOTE_MAX + "\n\n… обрезано\n".length);
+  assert.equal(got.length, NOTE_MAX);
   assert.ok(got.endsWith("\n\n… обрезано\n"));
 });
 ```
@@ -164,7 +190,7 @@ export type DocMark = "met" | "not_met" | "not_checked" | "dropped" | "open";
 // said: whose word the line is («со слов исполнителя»), already in the person's language
 export type DocLine = { kind: "text"; text: string; said?: string }
   | { kind: "item"; text: string; mark?: DocMark }
-  | { kind: "file"; path: string; body: string | null; note: string | null }; // note: why there is no body
+  | { kind: "file"; path: string; body: string | null; note: string | null }; // note: why there is no body, or how the body was read
 export interface DocSection { heading: string; collapsed?: boolean; lines: DocLine[] }
 export interface RunDoc { title: string; asOf: string; sections: DocSection[] }
 
@@ -207,23 +233,28 @@ export function toMarkdown(doc: RunDoc): string {
       if (l.kind !== "item" || prev !== "item") out.push("");
       if (l.kind === "text") out.push(l.said ? `${l.text} _(${l.said})_` : l.text);
       else if (l.kind === "item") out.push(`- ${l.mark ? `${MARK[l.mark]} ` : ""}${l.text}`);
-      else out.push(`### ${l.path}`, "", l.body !== null ? l.body.replace(/\n$/, "") : l.note ?? "");
+      else if (l.body !== null) out.push(`### ${l.path}`, "", ...(l.note ? [`_${l.note}_`, ""] : []), l.body.replace(/\n$/, ""));
+      else out.push(`### ${l.path}`, "", l.note ?? "");
       prev = l.kind;
     }
   }
   return `${out.join("\n")}\n`;
 }
 
-// Notes live in settings.json, written whole on every edit: a snapshot on the canvas is cut to this length.
-export const NOTE_MAX = 30_000;
-export const noteText = (markdown: string, cut: string): string =>
-  markdown.length <= NOTE_MAX ? markdown : `${markdown.slice(0, NOTE_MAX)}\n\n${cut}\n`;
+// Notes live in settings.json, which keeps 20 000 characters of a note (SettingsStore, the note's maxLength): a snapshot
+// on the canvas is cut to that, its closing line included, so nothing is cut again silently.
+export const NOTE_MAX = 20_000;
+export function noteText(markdown: string, cut: string): string {
+  if (markdown.length <= NOTE_MAX) return markdown;
+  const tail = `\n\n${cut}\n`;
+  return `${markdown.slice(0, NOTE_MAX - tail.length)}${tail}`;
+}
 ```
 
 - [ ] **Шаг 4: тесты зелёные**
 
 Run: `node --test tests/orchestration-run-docs.test.mjs`
-Expected: PASS, 7 тестов.
+Expected: PASS, 8 тестов.
 
 - [ ] **Шаг 5: коммит**
 
@@ -719,13 +750,181 @@ export function resultDoc(input: DocInput, docs: CreatedDocs, locale: LocaleId):
 - [ ] **Шаг 3: тесты зелёные**
 
 Run: `node --test tests/orchestration-run-docs.test.mjs`
-Expected: PASS, 17 тестов.
+Expected: PASS, 18 тестов.
 
 - [ ] **Шаг 4: коммит**
 
 ```bash
 git add src/renderer/src/features/orchestration/runDocs.ts tests/orchestration-run-docs.test.mjs
 git commit -m "feat(orchestration): the result document — outcome, what was done, requirements, created documents, how to take it"
+```
+
+---
+
+### Задача 3б: точный текст созданного файла из Git, diff — запасной путь
+
+**Файлы:**
+- Изменить: `src/main/services/orchestration/workspace.ts` — `readTreeFile` после `diffTreePath` (~771).
+- Изменить: `src/main/services/orchestration/manager.ts` — метод `file` после `diff` (~1255).
+- Изменить: `src/shared/orchestration.ts` — `OrchestrationFile` после `OrchestrationDiff` (~464), `file(...)` в API
+  после `diff(...)` (~609).
+- Изменить: `src/shared/contracts.ts` — `orchestrationFile: "orchestration:file"` после `orchestrationDiff` (~1171).
+- Изменить: `src/main/ipc/orchestrationIpc.ts` — обработчик после `orchestrationDiff` (~362), та же проверка пути.
+- Изменить: `src/preload/orchestrationClient.ts` — `file` после `diff` (~55).
+- Изменить: `src/renderer/src/features/orchestration/runDocs.ts` — `CreatedFile.restored`, `readCreatedFile`,
+  пометка в `createdLines`.
+- Изменить: `src/renderer/src/lib/i18n.ts` — `docFileRestored` (ru и en).
+- Тесты: `tests/orchestration-native.test.mjs` (main, рядом с проверкой `m.changes` ~234),
+  `tests/orchestration-run-docs.test.mjs`.
+
+**Интерфейсы:**
+- Использует: `changeTarget`, `diffTreeNames`, `controlCtx`, `run`, `requireOid` (main, уже есть); `addedText`,
+  `CreatedFile`, `createdLines` (задачи 1, 3).
+- Даёт (для задачи 4):
+  - `OrchestrationFile = { path: string; text: string | null; why: "too_large" | "binary" | null }`;
+  - `api().file(runId, path): Promise<OrchestrationResult<OrchestrationFile>>`;
+  - `CreatedFile` с необязательным `restored?: true`;
+  - `readCreatedFile(path, exact: () => Promise<OrchestrationFile | null>, diff: () => Promise<OrchestrationDiff | null>): Promise<CreatedFile>`.
+
+- [ ] **Шаг 1: падающие тесты renderer**
+
+В `tests/orchestration-run-docs.test.mjs` импорт расширить на `readCreatedFile`:
+
+```js
+const never = () => { throw new Error("diff must not be read"); };
+test("readCreatedFile: the exact text first, the diff never asked for", async () => {
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => ({ path: "docs/a.md", text: "# A\n", why: null }), never), { path: "docs/a.md", body: "# A\n", why: null });
+});
+test("readCreatedFile: too large or not text from the exact read is final", async () => {
+  assert.deepEqual(await readCreatedFile("b.md", async () => ({ path: "b.md", text: null, why: "too_large" }), never), { path: "b.md", body: null, why: "too_large" });
+  assert.deepEqual(await readCreatedFile("c.md", async () => ({ path: "c.md", text: null, why: "binary" }), never), { path: "c.md", body: null, why: "binary" });
+});
+test("readCreatedFile: the exact read failed — restored from the diff, marked", async () => {
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => null, async () => diffOf(["# A"])), { path: "docs/a.md", body: "# A\n", why: null, restored: true });
+});
+test("readCreatedFile: both failed — unavailable", async () => {
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => null, async () => null), { path: "docs/a.md", body: null, why: "unavailable" });
+});
+test("resultDoc: a restored document says so, in the view and in markdown", () => {
+  const doc = resultDoc(done(), ready([{ path: "docs/a.md", body: "# A\n", why: null, restored: true }]), "ru");
+  const f = doc.sections.find((s) => s.heading === "Созданные документы").lines[0];
+  assert.equal(f.note, "Восстановлено из изменений: точный текст файла прочитать не удалось.");
+  assert.match(toMarkdown(doc), /_Восстановлено из изменений: точный текст файла прочитать не удалось\._\n\n# A/);
+});
+```
+
+Run: `node --test tests/orchestration-run-docs.test.mjs` → FAIL (`readCreatedFile` не экспортирован).
+
+- [ ] **Шаг 2: renderer**
+
+`runDocs.ts` (импорт типов дополнить `OrchestrationFile`):
+
+```ts
+export type CreatedFile = { path: string; body: string | null; why: "loading" | "too_large" | "binary" | "unavailable" | null; restored?: true };
+
+// A created document's text (plan-result-docs.md §3.3): exactly from the run's Git tree first; read back from its diff
+// only when that read failed, and then marked. Too large or not text is the file's own answer: no diff is asked for.
+export async function readCreatedFile(path: string, exact: () => Promise<OrchestrationFile | null>, diff: () => Promise<OrchestrationDiff | null>): Promise<CreatedFile> {
+  const f = await exact();
+  if (f) return { path, body: f.text, why: f.why };
+  const d = await diff();
+  return d ? { path, ...addedText(d), restored: true } : { path, body: null, why: "unavailable" };
+}
+```
+
+`createdLines`: `note: f.why ? w(locale, WHY[f.why]) : f.restored ? w(locale, "docFileRestored") : null`.
+
+i18n: `docFileRestored` — ru «Восстановлено из изменений: точный текст файла прочитать не удалось.», en «Restored from
+the changes: the file's exact text could not be read.».
+
+- [ ] **Шаг 3: падающий тест main**
+
+В `tests/orchestration-native.test.mjs`, сразу после `assert.ok(changes.value.files.some((f) => f.path === "note.txt"), …)`:
+
+```js
+  const exact = await m.file(runId, "note.txt");
+  assert.deepEqual(exact.value, { path: "note.txt", text: "hello\n", why: null }, JSON.stringify(exact));
+  const outside = await m.file(runId, "user.txt");
+  assert.equal(outside.ok, false, "only a path the run's changes name");
+  assert.equal(outside.value.code ?? outside.error?.code, "invalid_argument", JSON.stringify(outside));
+```
+
+Форму отказа (`ok`/`value.code`) сверить с тем, как в этом же файле проверяются другие отказы `m.*`, и оставить одну.
+
+Отдельный тест на `readTreeFile` в том же файле: репозиторий через `createWorkspace` (как другие тесты файла), в дереве
+файл с байтом `\0` и файл больше `maxBytes` (передать `maxBytes = 16`):
+- `{ bytes, truncated: false }` для обычного файла, байты совпадают;
+- `{ bytes: null, truncated: true }` для большого (блоб целиком не читается: сначала `cat-file -s`);
+- путь с `..` или абсолютный — ошибка `invalid_input`.
+
+Run: `node --test tests/orchestration-native.test.mjs` → FAIL (`m.file is not a function`).
+
+- [ ] **Шаг 4: main**
+
+`workspace.ts`:
+
+```ts
+// A file of a tree of the control repository, exactly as stored (Git objects only, nothing written). Over maxBytes the
+// blob is not read at all: the caller says the file is too large.
+export async function readTreeFile(ws: Workspace, tree: string, path: string, maxBytes = 256 * 1024): Promise<{ bytes: Buffer | null; truncated: boolean }> {
+  requireOid(tree, "tree");
+  if (typeof path !== "string" || !path || path.startsWith("/") || path.split("/").includes("..") || path.includes("\0")) fail("invalid_input", "path must be relative");
+  const spec = `${tree}:${path}`;
+  const size = Number((await run(controlCtx(ws), ["cat-file", "-s", spec])).toString("utf8").trim());
+  if (!Number.isFinite(size) || size > maxBytes) return { bytes: null, truncated: true };
+  return { bytes: await run(controlCtx(ws), ["cat-file", "blob", spec]), truncated: false };
+}
+```
+
+`manager.ts`, после `diff`:
+
+```ts
+    // One file's exact text in the tree the change list reads, only for a path that list names (plan-result-docs.md).
+    file: (runId: string, path: string) => result(async (): Promise<OrchestrationFile> => {
+      const { ws, st, target } = await changeTarget(runIdOk(runId));
+      const names = await diffTreeNames(ws, st.workspace!.baseline.tree, target.tree);
+      const f = names.files.find((x) => x.path === path);
+      if (!f || f.status === "deleted") refuse("invalid_argument", "the path is not a file in this run's changes");
+      const r = await readTreeFile(ws, target.tree, path);
+      if (!r.bytes) return { path, text: null, why: "too_large" };
+      // as Git decides: a NUL in the first 8000 bytes is not text
+      if (r.bytes.subarray(0, 8000).includes(0)) return { path, text: null, why: "binary" };
+      return { path, text: r.bytes.toString("utf8"), why: null };
+    }),
+```
+
+Импорт `readTreeFile` добавить в строку импорта из `./workspace.ts` (~49), `OrchestrationFile` — к импорту типов.
+
+`orchestration.ts`: `export interface OrchestrationFile { path: string; text: string | null; why: "too_large" | "binary" | null }`
+и в API `file(runId: string, path: string): Promise<OrchestrationResult<OrchestrationFile>>;`.
+
+`contracts.ts`: `orchestrationFile: "orchestration:file",`.
+
+`orchestrationIpc.ts`:
+
+```ts
+  handleMain(IPC.orchestrationFile, (_e, runId: unknown, path: unknown) => checked(() => {
+    const p = str(path, "path", 4096);
+    if (p.startsWith("/") || p.split("/").includes("..")) bad("path must be relative to the copy");
+    return [uuid(runId, "runId"), p] as [string, string];
+  }, manager.file));
+```
+
+`orchestrationClient.ts`: `file: (runId, path) => ipc.invoke(IPC.orchestrationFile, runId, path),`.
+
+Если есть список разрешённых каналов IPC или тест, сверяющий `IPC` с preload (`grep -rn "orchestrationDiff" src tests`),
+добавить `orchestrationFile` туда же.
+
+- [ ] **Шаг 5: тесты и typecheck**
+
+Run: `npm run typecheck && node --test tests/orchestration-run-docs.test.mjs tests/orchestration-native.test.mjs`
+Expected: без ошибок, PASS.
+
+- [ ] **Шаг 6: коммит**
+
+```bash
+git add src/main src/shared src/preload src/renderer/src/features/orchestration/runDocs.ts src/renderer/src/lib/i18n.ts tests/orchestration-run-docs.test.mjs tests/orchestration-native.test.mjs
+git commit -m "feat(orchestration): a created document's exact text from the run's tree, its diff only as a fallback"
 ```
 
 ---
@@ -749,11 +948,12 @@ git commit -m "feat(orchestration): the result document — outcome, what was do
 
 **Интерфейсы:**
 - Использует:
-  - `planDoc`, `resultDoc`, `toMarkdown`, `noteText`, `pickDocs`, `addedText`, `PlanEntry`, `CreatedDocs`,
-    `CreatedFile`, `RunDoc`, `DocInput` (задачи 1–3);
+  - `planDoc`, `resultDoc`, `toMarkdown`, `pickDocs`, `readCreatedFile`, `PlanEntry`, `CreatedDocs`,
+    `CreatedFile`, `RunDoc`, `DocInput` (задачи 1–3б); `api().file` (задача 3б);
   - внутри `RunPanel.tsx` (уже есть): `useText`, `parseGoal`, `outcomeOf`, `outcomeText`, `api()`, `summaryModel`,
     `parsePlan`.
-- Даёт: `PanelTab` с `"plan" | "result"`. `RunPanel` принимает `onNoteFromText?: (text: string) => void` (вызов
+- Даёт: `PanelTab` с `"plan" | "result"`. `RunPanel` принимает
+  `onNoteFromText?: (markdown: string, source: { runId: string; doc: "plan" | "result" }) => void` (вызов
   подключает задача 5).
 
 - [ ] **Шаг 1: `PanelTab`**
@@ -769,13 +969,13 @@ export type PanelTab = "plan" | "result" | "summary" | "overview" | "activity" |
 В `RunPanel.tsx`, после `RunSummary`:
 
 ```tsx
-function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" | "result"; locale: LocaleId; onNote?: (text: string) => void }): React.JSX.Element {
+function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" | "result"; locale: LocaleId; onNote?: (markdown: string) => void }): React.JSX.Element {
   const [copied, setCopied] = useState(false);
   const md = toMarkdown(doc);
   const body = (lines: RunDoc["sections"][number]["lines"]) => lines.map((l, i) => l.kind === "item"
     ? <li key={i} data-doc-mark={l.mark ?? ""}>{l.mark ? <span className={`orch-doc__mark orch-doc__mark--${l.mark}`} aria-hidden="true" /> : null}{l.text}</li>
     : l.kind === "file"
-      ? <section key={i} className="orch-doc__file" data-doc-file={l.path}><h5><code>{l.path}</code></h5>{l.body !== null ? <pre>{l.body}</pre> : <p className="orch-hint">{l.note}</p>}</section>
+      ? <section key={i} className="orch-doc__file" data-doc-file={l.path}><h5><code>{l.path}</code></h5>{l.note && <p className="orch-hint" data-doc-file-note>{l.note}</p>}{l.body !== null && <pre>{l.body}</pre>}</section>
       : <p key={i} className="orch-panel__text">{l.text}{l.said && <i className="orch-doc__said"> ({l.said})</i>}</p>);
   // items of a section are one list; text and files stand between lists
   const group = (lines: RunDoc["sections"][number]["lines"]) => {
@@ -790,7 +990,7 @@ function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" |
     <article className="orch-doc" data-run-doc={kind}>
       <div className="orch-doc__actions">
         <button type="button" data-run-doc-copy onClick={() => { void window.canvasTTY.clipboard.writeText(md); setCopied(true); }}>{t(locale, copied ? "docCopied" : "docCopy")}</button>
-        {onNote && <button type="button" data-run-doc-note onClick={() => onNote(noteText(md, t(locale, "docNoteCut")))}>{t(locale, "docToCanvas")}</button>}
+        {onNote && <button type="button" data-run-doc-note onClick={() => onNote(md)}>{t(locale, "docToCanvas")}</button>}
       </div>
       <h3>{doc.title}</h3>
       <p className="orch-hint">{doc.asOf}</p>
@@ -801,8 +1001,8 @@ function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" |
   );
 }
 
-// The documents a task created, read back from their diffs: the list again when the run moves (as the «Changes» tab),
-// a file's diff again only when its path or the list's tree changed; one call at a time. Skipped for a newer
+// The documents a task created, exactly from the run's tree (their diff only as a fallback): the list again when the run
+// moves (as the «Changes» tab), a file again only when its path or the list's tree changed; one call at a time. Skipped for a newer
 // version's run (main gives no changes for it).
 function useCreatedDocs(locale: LocaleId, runId: string, seq: number, skip: boolean): { docs: CreatedDocs; retry(): void } {
   const [docs, setDocs] = useState<CreatedDocs>(skip ? { state: "skipped" } : { state: "loading" });
@@ -822,10 +1022,14 @@ function useCreatedDocs(locale: LocaleId, runId: string, seq: number, skip: bool
         const key = `${ch.value.atTs ?? ""}:${path}`;
         let file = cache.current.get(key);
         if (!file) {
-          const d = await outcomeOf(() => api().diff(runId, path));
+          const ok = async <T,>(call: () => Promise<OrchestrationResult<T>>): Promise<T | null> => {
+            const r = await outcomeOf(call);
+            return r.outcome.kind === "accepted" && r.value ? r.value : null;
+          };
+          file = await readCreatedFile(path, () => ok(() => api().file(runId, path)), () => ok(() => api().diff(runId, path)));
           if (!live) return;
-          file = d.outcome.kind === "accepted" && d.value ? { path, ...addedText(d.value) } : { path, body: null, why: "unavailable" };
-          if (file.why !== "unavailable") cache.current.set(key, file);
+          // a restored text is not kept: the next pass tries the exact read again
+          if (file.why !== "unavailable" && !file.restored) cache.current.set(key, file);
         }
         files.push(file);
       }
@@ -838,7 +1042,7 @@ function useCreatedDocs(locale: LocaleId, runId: string, seq: number, skip: bool
 
 function RunDocs({ kind, orch, runId, view, records, locale, task, take, seq, incomplete, onNote }: {
   kind: "plan" | "result"; orch: Orchestration; runId: string; view: OrchestrationRunView; records: readonly OrchestrationHistoryRecord[];
-  locale: LocaleId; task: { key: string; title: string } | null; take: OrchestrationTake | null; seq: number; incomplete: boolean; onNote?: (text: string) => void;
+  locale: LocaleId; task: { key: string; title: string } | null; take: OrchestrationTake | null; seq: number; incomplete: boolean; onNote?: (markdown: string, source: { runId: string; doc: "plan" | "result" }) => void;
 }): React.JSX.Element {
   const planRecords = useMemo(() => records.filter((r) => r.type === "plan.recorded"), [records]);
   const shas = useMemo(() => [
@@ -873,7 +1077,7 @@ function RunDocs({ kind, orch, runId, view, records, locale, task, take, seq, in
     return kind === "plan" ? planDoc(input, locale) : resultDoc(input, created.docs, locale);
   }, [kind, view, records, planRecords, textsKey, goalText, task, take, created.docs, incomplete, locale]);
   return <>
-    <RunDocView doc={doc} kind={kind} locale={locale} onNote={onNote} />
+    <RunDocView doc={doc} kind={kind} locale={locale} onNote={onNote && ((md) => onNote(md, { runId, doc: kind }))} />
     {kind === "result" && created.docs.state === "error" && <button type="button" data-run-doc-retry onClick={created.retry}>{t(locale, "orchRepeat")}</button>}
   </>;
 }
@@ -889,6 +1093,7 @@ function RunDocs({ kind, orch, runId, view, records, locale, task, take, seq, in
 - **`take`.** Взять то же значение, что использует `TakeResult` в `CurrentRunPanel` (переменная `take`, строка ~1626).
 - **Импорты.** `Orchestration`, `OrchestrationHistoryRecord`, `OrchestrationTake`, `TextRef` в `RunPanel.tsx` уже есть —
   проверить по началу файла.
+  `OrchestrationResult` (для `ok` в `useCreatedDocs`) добавить к импорту типов из `shared/orchestration`, если его нет.
 
 - [ ] **Шаг 3: вкладки, широкая панель, «Открыть результат», «Открыть план»**
 
@@ -1001,59 +1206,204 @@ git commit -m "feat(orchestration): Plan and Result tabs of the run panel"
 
 ---
 
-### Задача 5: «На холст» — заметка со снимком документа
+### Задача 5: «На холст» — заметка-снимок с «Открыть актуальный»
 
 **Файлы:**
-- Изменить: `src/renderer/src/features/workspace/WorkspaceCanvas.tsx` — `noteFromText` рядом с `createNote` (~665),
-  проп в `<OrchestrationOverlays …>` (~1262).
+- Изменить: `src/shared/contracts.ts:173` — `StickyNoteSource`, необязательное `source` у `StickyNote`.
+- Изменить: `src/main/services/SettingsStore.ts` — `normalizeStickyNotes` (~745) сохраняет проверенное `source`.
+- Изменить: `src/renderer/src/features/orchestration/runDocs.ts` — `snapshotText`.
+- Изменить: `src/renderer/src/features/notes/StickyNoteCard.tsx` — плашка снимка и кнопка, проп `onOpenSource`.
+- Изменить: `src/renderer/src/features/workspace/WorkspaceCanvas.tsx` — `noteFromText` рядом с `createNote` (~664);
+  проп в `<OrchestrationOverlays …>`; `onOpenSource` у `<StickyNoteCard>` (~1040); тип `tab` у
+  `openRunInWorkspace` (~254) расширить до `PanelTab`.
 - Изменить: `src/renderer/src/features/orchestration/OrchestrationDialogs.tsx:607-624` — проп `onNoteFromText` в
   `OrchestrationOverlays` и в `<RunPanel>`.
+- Изменить: `src/renderer/src/lib/i18n.ts` — `docSnapshotLine`, `noteSnapshotOf`, `noteOpenCurrent` (ru и en).
+- Стили: рядом с `.sticky-note-card__header` — `.sticky-note-card__source`.
+- Тесты: `tests/orchestration-run-docs.test.mjs`, `tests/settings-normalizer.test.mjs` (или `tests/sticky-notes.test.mjs`
+  — где уже проверяется `normalizeStickyNotes`).
 - Изменить: `scripts/smoke-orchestration-ui.mjs`.
 
 **Интерфейсы:**
-- Использует: `RunPanel` проп `onNoteFromText?: (text: string) => void` (задача 4), `stickyNoteAtPoint`,
-  `viewportCenterWorldPoint`, `onCreateStickyNote`.
+- Использует: `RunPanel` проп `onNoteFromText?: (markdown: string, source: { runId: string; doc: "plan" | "result" }) => void`
+  (задача 4); `noteText`, `NOTE_MAX` (задача 1); `stickyNoteAtPoint`, `viewportCenterWorldPoint`, `onCreateStickyNote`,
+  `openRunInWorkspace` (`WorkspaceCanvas`).
+- Даёт: `StickyNoteSource = { runId: string; doc: "plan" | "result"; at: string }` (ISO-время снимка);
+  `snapshotText(markdown, locale, at): string`.
 
-- [ ] **Шаг 1: `WorkspaceCanvas`**
+Почему так: снимок никогда не обновляется сам. Он честно говорит, что он копия и на какое время, — и в тексте (первая
+строка, видна в любой версии приложения и при копировании заметки), и плашкой над текстом. «Открыть актуальный»
+открывает ту же вкладку запуска, где документ собран заново из журнала: после перепланирования там новый план, на
+холсте — прежняя помеченная копия.
 
-```tsx
-  // a run document's snapshot as a note in the middle of the view (plan-result-docs.md §5): the active workspace
-  const noteFromText = useCallback((text: string): void => {
-    onCreateStickyNote({ ...stickyNoteAtPoint(viewportCenterWorldPoint(), crypto.randomUUID()), text });
-  }, [onCreateStickyNote, viewportCenterWorldPoint]);
-```
+- [ ] **Шаг 1: падающие тесты**
 
-```tsx
-<OrchestrationOverlays taskOfRun={board.taskOfRun} orch={orch} ui={agentUi} locale={settings.locale} defaultProject={settings.lastDirectory} folderBusy={folderBusy} onNoteFromText={noteFromText} />
-```
-
-- [ ] **Шаг 2: `OrchestrationOverlays`**
-
-В деструктуризацию и тип пропов добавить `onNoteFromText?: (text: string) => void`. В `<RunPanel …>` добавить
-`onNoteFromText={onNoteFromText}`.
-
-- [ ] **Шаг 3: smoke**
-
-После проверки «Копировать» из задачи 4:
+`tests/orchestration-run-docs.test.mjs` (импорт расширить на `snapshotText`):
 
 ```js
-  const notesBefore = await app.ev(`document.querySelectorAll("[data-sticky-note-id], .sticky-note").length`);
-  await app.clickEl(q("[data-run-doc-note]"));
-  await app.waitFor(`document.querySelectorAll("[data-sticky-note-id], .sticky-note").length === ${notesBefore} + 1`, "a note added");
-  const noteText = await app.ev(`[...document.querySelectorAll("[data-sticky-note-id] textarea, .sticky-note textarea")].at(-1)?.value ?? null`);
-  expect(typeof noteText === "string" && noteText.startsWith("# ") && noteText.includes("— план"), "«To the canvas» puts the plan on the canvas as a note", noteText?.slice(0, 80));
+test("snapshotText: the first line says it is a copy and of when; the document follows unchanged", () => {
+  const got = snapshotText("# T-1 — план\n\nтекст\n", "ru", "2026-10-14T09:30:00.000Z");
+  const [first, empty, ...rest] = got.split("\n");
+  assert.match(first, /^> Копия документа на \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}\. Актуальный — «Открыть актуальный» на заметке или вкладка запуска\.$/);
+  assert.equal(empty, "");
+  assert.equal(rest.join("\n"), "# T-1 — план\n\nтекст\n");
+});
+
+test("noteText over snapshotText: the copy line survives the cut, the whole note fits NOTE_MAX", () => {
+  const got = noteText(snapshotText("x".repeat(NOTE_MAX), "ru", "2026-10-14T09:30:00.000Z"), "… обрезано");
+  assert.ok(got.startsWith("> Копия документа на "));
+  assert.equal(got.length, NOTE_MAX);
+});
 ```
 
-Селектор заметки сверить с `StickyNoteCard.tsx` (корневой элемент и `textarea`) и оставить один точный.
+В тест нормализатора заметок (найти `normalizeStickyNotes` в `tests/`):
+
+```js
+test("a note keeps where its snapshot came from; a bad source is dropped, the note kept", () => {
+  const base = { id: "11111111-1111-4111-8111-111111111111", text: "> Копия", position: { x: 0, y: 0 }, size: { width: 300, height: 220 } };
+  const source = { runId: "a0734db5-0000-4000-8000-000000000000", doc: "plan", at: "2026-10-14T09:30:00.000Z" };
+  assert.deepEqual(normalizeStickyNotes([{ ...base, source }])[0].source, source);
+  for (const bad of [{ ...source, doc: "summary" }, { ...source, runId: "../x" }, { ...source, at: "вчера" }, "plan", null]) {
+    const [n] = normalizeStickyNotes([{ ...base, source: bad }]);
+    assert.equal(n.text, "> Копия");
+    assert.ok(!("source" in n), JSON.stringify(bad));
+  }
+});
+```
+
+Формат `id` сверить с `isInstanceId` (если он не принимает такой UUID — взять `id` из соседних тестов файла).
+
+Run: `node --test tests/orchestration-run-docs.test.mjs tests/<файл нормализатора>` → FAIL.
+
+- [ ] **Шаг 2: типы и нормализатор**
+
+`contracts.ts`:
+
+```ts
+// A note that is a snapshot of a run's document (plan-result-docs.md §5): which run, which document, when it was taken.
+export interface StickyNoteSource { runId: string; doc: "plan" | "result"; at: string }
+
+export interface StickyNote extends SessionBounds {
+  id: string;
+  text: string;
+  workspaceId?: string;
+  source?: StickyNoteSource;
+}
+```
+
+`SettingsStore.ts`, рядом с `workspaceField`:
+
+```ts
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Where a snapshot note came from, or nothing: a note never loses its text over a bad source.
+function noteSource(value: unknown): { source?: StickyNoteSource } {
+  if (!value || typeof value !== "object") return {};
+  const s = value as Partial<StickyNoteSource>;
+  if (typeof s.runId !== "string" || !RUN_ID.test(s.runId) || (s.doc !== "plan" && s.doc !== "result")) return {};
+  if (typeof s.at !== "string" || s.at.length > 40 || Number.isNaN(Date.parse(s.at))) return {};
+  return { source: { runId: s.runId, doc: s.doc, at: s.at } };
+}
+```
+
+В `normalizeStickyNotes` после `...workspaceField(source.workspaceId)`: `...noteSource(source.source)`.
+
+Проверить: правка текста заметки (`changeStickyNoteText` в `App.tsx`) и перемещение не теряют `source` — они
+копируют объект заметки (`{ ...note, text }`). Если где-то заметка собирается заново по полям — добавить `source`.
+
+- [ ] **Шаг 3: `snapshotText`**
+
+`runDocs.ts`:
+
+```ts
+// The first line of a snapshot on the canvas: a copy, of when, where the current one is. The time is the person's own.
+export function snapshotText(markdown: string, locale: LocaleId, at: string): string {
+  const time = new Date(at).toLocaleString(locale === "ru" ? "ru-RU" : "en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  return `> ${w(locale, "docSnapshotLine", { time })}\n\n${markdown}`;
+}
+```
+
+i18n:
+- `docSnapshotLine` — ru «Копия документа на {time}. Актуальный — «Открыть актуальный» на заметке или вкладка
+  запуска.», en «A copy of the document as of {time}. The current one: «Open current» on the note, or the run's tab.»;
+- `noteSnapshotOf` — ru «Копия документа на {time}», en «A copy of the document as of {time}»;
+- `noteOpenCurrent` — ru «Открыть актуальный», en «Open current».
+
+Если `toLocaleString("ru-RU")` в Node тестов даёт формат без запятой — подогнать регулярку теста под фактический
+формат `ru-RU`, а не формат под тест.
+
+- [ ] **Шаг 4: заметка**
+
+`StickyNoteCard.tsx`: проп `onOpenSource?(source: StickyNoteSource): void`. Между `</header>` и `<textarea`:
+
+```tsx
+      {note.source && (
+        <div className="sticky-note-card__source" data-note-source={note.source.doc}>
+          <span>{t(locale, "noteSnapshotOf").replace("{time}", new Date(note.source.at).toLocaleString(locale === "ru" ? "ru-RU" : "en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }))}</span>
+          {onOpenSource && <button type="button" data-note-open-source onClick={() => onOpenSource(note.source!)}>{t(locale, "noteOpenCurrent")}</button>}
+        </div>
+      )}
+```
+
+Стиль: строка над полем, мелкий шрифт, кнопка справа; высота поля не должна вылезать за карточку (сверить с тем, как
+поле заполняет карточку — grid или flex — и подогнать).
+
+`WorkspaceCanvas.tsx`:
+
+```tsx
+  // a run document's snapshot as a note in the middle of the view (plan-result-docs.md §5): marked as a copy of when,
+  // with the way back to the current one; the active workspace, like any new note
+  const noteFromText = useCallback((markdown: string, from: { runId: string; doc: "plan" | "result" }): void => {
+    const at = new Date().toISOString();
+    const text = noteText(snapshotText(markdown, settings.locale, at), t(settings.locale, "docNoteCut"));
+    onCreateStickyNote({ ...stickyNoteAtPoint(viewportCenterWorldPoint(), crypto.randomUUID()), text, source: { ...from, at } });
+  }, [onCreateStickyNote, settings.locale, viewportCenterWorldPoint]);
+```
+
+Проверить, что `createNote` не ставит `workspaceId` сам, а это делает `onCreateStickyNote` в `App.tsx` (иначе
+повторить то же здесь).
+
+```tsx
+<OrchestrationOverlays … onNoteFromText={noteFromText} />
+```
+
+`<StickyNoteCard … onOpenSource={(s) => openRunInWorkspace(s.runId, s.doc)} />` — `openRunInWorkspace` (~254)
+принимает `tab?: PanelTab` вместо `tab?: "summary"`; `agentUi.openPanel(link.linkId, { tab })` и `openRunById` уже
+принимают `PanelTab` после задачи 4.
+
+- [ ] **Шаг 5: `OrchestrationOverlays`**
+
+В деструктуризацию и тип пропов добавить `onNoteFromText?: (markdown: string, source: { runId: string; doc: "plan" | "result" }) => void`,
+в `<RunPanel …>` — `onNoteFromText={onNoteFromText}`.
+
+- [ ] **Шаг 6: smoke**
+
+В `scripts/smoke-orchestration-ui.mjs`, после проверки «Копировать» из задачи 4 (открыта вкладка «План»):
+
+```js
+  const notesBefore = await app.ev(`document.querySelectorAll("[data-sticky-note-id]").length`);
+  await app.clickEl(q("[data-run-doc-note]"));
+  await app.waitFor(`document.querySelectorAll("[data-sticky-note-id]").length === ${notesBefore} + 1`, "a note added");
+  const note = `[...document.querySelectorAll("[data-sticky-note-id]")].at(-1)`;
+  const noteText = await app.ev(`${note}.querySelector("textarea").value`);
+  expect(noteText.startsWith("> Копия документа на ") && noteText.includes("— план"), "«To the canvas»: a note marked as a copy of when", noteText.slice(0, 120));
+  expect(await app.ev(`${note}.querySelector('[data-note-source="plan"]') !== null`), "the note shows it is a snapshot of the plan", null);
+  await app.clickEl(q("[data-orch-tab='result']")); // away from the plan
+  await app.clickEl(`${note}.querySelector("[data-note-open-source]")`);
+  await app.waitFor(`${q('[data-run-doc="plan"]')} !== null`, "«Open current» opens the run's plan tab");
+  expect(true, "«Open current» on the note opens the current plan", null);
+```
+
+Селектор вкладки (`data-orch-tab`) и язык интерфейса smoke сверить с файлом; если smoke идёт на английском — ожидать
+«> A copy of the document as of » и «— plan».
 
 Run: `npm run build && node scripts/smoke-orchestration-ui.mjs`
 Expected: `"ok": true`.
 
-- [ ] **Шаг 4: коммит**
+- [ ] **Шаг 7: коммит**
 
 ```bash
-git add src/renderer/src/features/workspace/WorkspaceCanvas.tsx src/renderer/src/features/orchestration/OrchestrationDialogs.tsx scripts/smoke-orchestration-ui.mjs
-git commit -m "feat(orchestration): a run document's snapshot as a note on the canvas"
+git add src/shared/contracts.ts src/main/services/SettingsStore.ts src/renderer/src scripts/smoke-orchestration-ui.mjs tests
+git commit -m "feat(orchestration): a run document's snapshot as a note, marked as a copy, with the way to the current one"
 ```
 
 ---
@@ -1116,7 +1466,11 @@ git commit -m "feat(board): Plan and Result on a task's card"
 1. §5: цепочка — `WorkspaceCanvas` → `OrchestrationOverlays` → `RunPanel`, без `AgentScene`.
 2. §3.3: строка `orchChangesAt_<at>` показывается всегда, когда есть документы (как во вкладке «Изменения»), а не
    только при «не финальном» дереве.
-3. Статус: «реализовано, на ревью».
+3. §3.3: текст созданного документа — точно из дерева запуска (`orchestration:file`), diff — запасной путь с пометкой
+   «восстановлено из изменений»; «Main и IPC не меняются» заменить на новый вызов чтения.
+4. §5: заметка-снимок — первая строка «Копия документа на …», плашка и «Открыть актуальный», поле `source`;
+   лимит 20 000 символов вместе с хвостом (не 30 000).
+5. Статус: «реализовано, на ревью».
 
 - [ ] **Шаг 2: полный прогон**
 
@@ -1140,9 +1494,12 @@ Expected:
 
 - [ ] **Шаг 3: ручная проверка на реальном запуске**
 
-Собранное приложение, профиль владельца, запуск T-1 в career-os (`a0734db5`). Открыть «План» и «Результат». В
-«Созданных документах» виден текст `business-logic-review-2026-10-11.md`. Снять снимки обеих вкладок в
-`docs/ux-audit/<дата>/run-docs/`.
+Собранное приложение на **копии** профиля владельца (`ditto` в scratchpad; живой профиль и установленное приложение
+не трогать, модели не вызывать — только чтение готового запуска). Запуск T-1 в career-os (`a0734db5`). Открыть «План»
+и «Результат». В «Созданных документах» виден точный текст `business-logic-review-2026-10-11.md` без пометки
+«восстановлено». «На холст» — заметка с плашкой «Копия документа на …», «Открыть актуальный» открывает вкладку. Снять
+снимки обеих вкладок и заметки в `docs/ux-audit/<дата>/run-docs/`. Если копия профиля не открывает запуск (например,
+main проверяет ссылки в career-os и что-то не сходится) — снимки на запуске smoke, и это сказать в отчёте.
 
 - [ ] **Шаг 4: коммит**
 
