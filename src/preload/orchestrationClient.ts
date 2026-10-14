@@ -53,6 +53,7 @@ export function createOrchestrationClient(ipc: OrchestrationIpc, platform: strin
     activity: (runId, afterId, limit) => ipc.invoke(IPC.orchestrationActivity, runId, afterId, limit),
     changes: (runId) => ipc.invoke(IPC.orchestrationChanges, runId),
     diff: (runId, path) => ipc.invoke(IPC.orchestrationDiff, runId, path),
+    file: (runId, path) => ipc.invoke(IPC.orchestrationFile, runId, path),
     take: (runId) => ipc.invoke(IPC.orchestrationTake, runId),
     takeResult: (runId, input) => ipc.invoke(IPC.orchestrationTakeResult, runId, input),
     board: () => ipc.invoke(IPC.orchestrationBoard),

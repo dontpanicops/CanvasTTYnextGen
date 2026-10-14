@@ -783,6 +783,17 @@ export async function diffTreePath(ws: Workspace, fromTree: string, toTree: stri
   return { text: buf.toString("utf8"), truncated: false };
 }
 
+// A file of a tree of the control repository, exactly as stored (Git objects only, nothing written). Over maxBytes the
+// blob is not read at all: the caller says the file is too large.
+export async function readTreeFile(ws: Workspace, tree: string, path: string, maxBytes = 256 * 1024): Promise<{ bytes: Buffer | null; truncated: boolean }> {
+  requireOid(tree, "tree");
+  if (typeof path !== "string" || !path || path.startsWith("/") || path.split("/").includes("..") || path.includes("\0")) fail("invalid_input", "path must be relative");
+  const spec = `${tree}:${path}`;
+  const size = Number((await run(controlCtx(ws), ["cat-file", "-s", spec])).toString("utf8").trim());
+  if (!Number.isFinite(size) || size > maxBytes) return { bytes: null, truncated: true };
+  return { bytes: await run(controlCtx(ws), ["cat-file", "blob", spec]), truncated: false };
+}
+
 // Create-only; an existing ref with the same commit is accepted (a retried call), any other is ref_conflict.
 export async function setControlRef(ws: Workspace, ref: string, commit: string): Promise<void> {
   if (typeof ref !== "string" || !/^refs\/canvastty\/[A-Za-z0-9._/-]+$/.test(ref) || ref.includes("..")) fail("invalid_input", "ref must be under refs/canvastty/");

@@ -172,6 +172,14 @@ try {
   expect(done1.column === "done" && done1.line.startsWith("Готово — подтверждено проверками") && done1.badge?.includes("confirmed"), "T-1: Done, confirmed by checks", done1);
   expect(await app.ev(`${q("[data-orch-task]")}?.dataset.orchTask`) === "T-1", "the run's summary starts with T-1", await app.ev(`${q(".orch-summary")}?.textContent.slice(0, 200)`));
   await closePanel();
+  await app.clickEl(`${q(task("T-1"))}.querySelector("[data-board-open-result]")`);
+  await app.waitFor(`!!(${q('[data-orch-tab="result"][aria-selected="true"]')} && ${q('[data-run-doc="result"]')})`, "board: Result opens the result tab");
+  expect(true, "board: «Result» on the card opens the run's result", null);
+  await closePanel();
+  await app.clickEl(`${q(task("T-1"))}.querySelector("[data-board-open-plan]")`);
+  await app.waitFor(`!!(${q('[data-orch-tab="plan"][aria-selected="true"]')} && ${q('[data-run-doc="plan"]')})`, "board: Plan opens the plan tab");
+  expect(true, "board: «Plan» on the card opens the run's plan", null);
+  await closePanel();
   const run1View = await app.ev(`window.canvasTTY.orchestration.get(${JSON.stringify(run1)}).then((r) => [r.value.view.status, r.value.view.progress?.completion])`);
   expect(JSON.stringify(run1View) === '["completed","confirmed"]', "the same data: the run completed, confirmed", run1View);
   const t3After1 = await shown("T-3");

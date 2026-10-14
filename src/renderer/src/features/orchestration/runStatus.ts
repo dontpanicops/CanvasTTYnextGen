@@ -468,6 +468,12 @@ export function reportParts(text: string): ReportParts {
 // The outcome in one sentence, apart for each end: never "done" for a run that did not reach its goal.
 // complete: the whole journal was read. A completed run whose final review is not read yet is said as such — never as
 // a final review that did not confirm the goal.
+// A3: a run the reviewer reviews says so in these words — the application accepts its stages, the reviewer concludes.
+export const REVIEWER_WORDS: readonly string[] = ["orchSumOutcome_completed", "orchSumOutcome_completed_no_checks", "orchSumStages_count",
+  "orchSumStages_countPartial", "orchSumStage_done", "orchSumStage_not_done", "orchSumStage_not_checked", "orchSum_lead", "orchSumRemarksNone",
+  "orchSumCurrentReview", "orchSumCurrentReviewPartial"];
+export const saidKey = (view: OrchestrationRunView | null, key: string): string =>
+  (byReviewer(view) && REVIEWER_WORDS.includes(key) ? `${key}_rv` : key);
 export function outcomeKey(view: OrchestrationRunView, finalVerdict: string | null, complete = true): string {
   if (runStatusKey(view) === "completed_no_checks") return "completed_no_checks"; // never "completed": no check ran
   if (view.status === "completed") return finalVerdict === "complete" ? "completed" : complete ? "completed_unconfirmed" : "completed_unloaded";

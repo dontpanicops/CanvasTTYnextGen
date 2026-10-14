@@ -225,6 +225,10 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                               {runId && st.reason === "waits_permission"
                                 ? <button type="button" className="orch-primary" data-board-open data-board-answer onClick={() => ui.openRunById(runId)}>{t(locale, "boardAnswer")}</button>
                                 : runId && <button type="button" data-board-open onClick={() => ui.openRunById(runId)}>{t(locale, "orchOpenRun")}</button>}
+                              {runId && <>
+                                <button type="button" data-board-open-plan onClick={() => ui.openRunById(runId, "plan")}>{t(locale, "orchTab_plan")}</button>
+                                <button type="button" data-board-open-result onClick={() => ui.openRunById(runId, "result")}>{t(locale, "orchTab_result")}</button>
+                              </>}
                               {st.reason === "no_checks" && <button type="button" className="orch-primary" data-board-accept onClick={() => setAccepting(task.id)}>{t(locale, "boardAccept")}</button>}
                               {canMerge && merging !== task.id && <button type="button" data-board-merge
                                 onClick={() => (head && fact?.board === head.ref ? void mergeTask(task) : setMerging(task.id))}>{t(locale, "boardMerge")}</button>}

@@ -170,10 +170,14 @@ export interface SessionBounds {
   size: Size;
 }
 
+// A note that is a snapshot of a run's document (plan-result-docs.md §5): which run, which document, when it was taken.
+export interface StickyNoteSource { runId: string; doc: "plan" | "result"; at: string }
+
 export interface StickyNote extends SessionBounds {
   id: string;
   text: string;
   workspaceId?: string;
+  source?: StickyNoteSource;
 }
 
 export const STICKY_NOTE_MIN_SIZE: Size = { width: 180, height: 140 };
@@ -1169,6 +1173,7 @@ export const IPC = {
   orchestrationActivity: "orchestration:activity",
   orchestrationChanges: "orchestration:changes",
   orchestrationDiff: "orchestration:diff",
+  orchestrationFile: "orchestration:file",
   orchestrationTake: "orchestration:take",
   orchestrationTakeResult: "orchestration:take-result",
   orchestrationBoard: "orchestration:board",

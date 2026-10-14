@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { LocaleId, Point, SessionBounds, StickyNote } from "../../../../shared/contracts";
+import type { LocaleId, Point, SessionBounds, StickyNote, StickyNoteSource } from "../../../../shared/contracts";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
+import { snapshotTime } from "../orchestration/runDocs";
 import { snapMove, snapResize, type ResizeDirection } from "../workspace/snap";
 import {
   constrainStickyNoteResize,
@@ -20,6 +21,7 @@ interface StickyNoteCardProps {
   onBoundsChange(id: string, bounds: SessionBounds): void;
   onTextChange(id: string, text: string): void;
   onClose(id: string): void;
+  onOpenSource?(source: StickyNoteSource): void;
   /** True while this card is part of the marquee selection. */
   groupSelected?: boolean;
 }
@@ -48,6 +50,7 @@ export function StickyNoteCard({
   onBoundsChange,
   onTextChange,
   onClose,
+  onOpenSource,
   groupSelected = false
 }: StickyNoteCardProps): React.JSX.Element {
   const editor = useRef<HTMLTextAreaElement>(null);
@@ -215,7 +218,7 @@ export function StickyNoteCard({
 
   return (
     <article
-      className={`sticky-note-card ${groupSelected ? "sticky-note-card--selected" : ""}`}
+      className={`sticky-note-card ${groupSelected ? "sticky-note-card--selected" : ""} ${note.source ? "sticky-note-card--sourced" : ""}`}
       data-interactive="true"
       data-sticky-note-id={note.id}
       data-canvas-layer-id={`note:${note.id}`}
@@ -249,6 +252,12 @@ export function StickyNoteCard({
           <UiIcon name="close" size="1.23em" />
         </button>
       </header>
+      {note.source && (
+        <div className="sticky-note-card__source" data-note-source={note.source.doc}>
+          <span>{t(locale, "noteSnapshotOf").replace("{time}", snapshotTime(locale, note.source.at))}</span>
+          {onOpenSource && <button type="button" data-note-open-source onClick={() => onOpenSource(note.source as StickyNoteSource)}>{t(locale, "noteOpenCurrent")}</button>}
+        </div>
+      )}
       <textarea
         ref={editor}
         className="sticky-note-card__editor"

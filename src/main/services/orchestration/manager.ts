@@ -13,6 +13,7 @@ import type {
   OrchestrationCanvas,
   OrchestrationChanges,
   OrchestrationDiff,
+  OrchestrationFile,
   OrchestrationCreateRequest,
   OrchestrationHistoryPage,
   OrchestrationResult,
@@ -46,7 +47,7 @@ import type { CommandOutcome, GoalInput, RunCommand, RunHandle } from "./orchest
 import { readRun, readText } from "./store.ts";
 import type { RunReadResult } from "./store.ts";
 import type { SupervisorLaunch } from "./types.ts";
-import { BOARD_REF, applyToProject, branchCommit, branchNameOk, diffTreeNames, diffTreePath, openWorkspace, readTaken, readWorkspacePlace, snapshotCopyTree, takeToBranch, writeTaken } from "./workspace.ts";
+import { BOARD_REF, applyToProject, branchCommit, branchNameOk, diffTreeNames, diffTreePath, openWorkspace, readTaken, readTreeFile, readWorkspacePlace, snapshotCopyTree, takeToBranch, writeTaken } from "./workspace.ts";
 import type { CloneDir } from "./workspace.ts";
 import { canvasFile, createCanvasStore, folderHolder } from "./canvasStore.ts";
 import type { RunMode } from "./canvasStore.ts";
@@ -1250,6 +1251,18 @@ export function createRunManager(deps: RunManagerDeps) {
       if (!names.files.some((f) => f.path === path)) refuse("invalid_argument", "the path is not in this run's changes");
       const d = await diffTreePath(ws, st.workspace!.baseline.tree, target.tree, path);
       return { path, text: d.text, truncated: d.truncated };
+    }),
+    // One file's exact text in the tree the change list reads, only for a path that list names (plan-result-docs.md).
+    file: (runId: string, path: string) => result(async (): Promise<OrchestrationFile> => {
+      const { ws, st, target } = await changeTarget(runIdOk(runId));
+      const names = await diffTreeNames(ws, st.workspace!.baseline.tree, target.tree);
+      const f = names.files.find((x) => x.path === path);
+      if (!f || f.status === "deleted") refuse("invalid_argument", "the path is not a file in this run's changes");
+      const r = await readTreeFile(ws, target.tree, path);
+      if (!r.bytes) return { path, text: null, why: "too_large" };
+      // as Git decides: a NUL in the first 8000 bytes is not text
+      if (r.bytes.subarray(0, 8000).includes(0)) return { path, text: null, why: "binary" };
+      return { path, text: r.bytes.toString("utf8"), why: null };
     }),
 
     take: (runId: string) => result(async () => (await takeState(runIdOk(runId))).info),
