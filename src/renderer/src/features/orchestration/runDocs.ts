@@ -4,7 +4,8 @@
 import type { LocaleId } from "../../../../shared/contracts.ts";
 import type { OrchestrationChanges, OrchestrationConditions, OrchestrationDiff, OrchestrationRunView, OrchestrationTake } from "../../../../shared/orchestration.ts";
 import { t, type TranslationKey } from "../../lib/i18n.ts";
-import { saidKey, type RunSummaryModel } from "./runStatus.ts";
+import { outcomeKey, reportParts, saidKey, type RunSummaryModel } from "./runStatus.ts";
+import { takenLines } from "./runModel.ts";
 
 export type DocMark = "met" | "not_met" | "not_checked" | "dropped" | "open";
 // said: whose word the line is («со слов исполнителя»), already in the person's language
@@ -152,4 +153,55 @@ export function planDoc(input: DocInput, locale: LocaleId): RunDoc {
     sections.push({ heading: say("docQuestion"), lines: [{ kind: "text", text: last.question, said: say("docByLead") }] });
   }
   return { title: say("docPlanTitle", { name: docName(input) }), asOf: say("docAsOf", { time: hhmm(locale, input.asOf) }), sections };
+}
+
+export type CreatedFile = { path: string; body: string | null; why: "loading" | "too_large" | "binary" | "unavailable" | null };
+// skipped: not read at all (a newer version's run: main gives no changes for it)
+export type CreatedDocs = { state: "skipped" } | { state: "loading" } | { state: "error"; message: string }
+  | { state: "ready"; at: string; files: CreatedFile[]; more: number };
+
+const WHY = { loading: "docLoading", too_large: "docFileTooLarge", binary: "docFileBinary", unavailable: "docFileUnavailable" } as const;
+
+function createdLines(locale: LocaleId, docs: CreatedDocs): DocLine[] | null {
+  if (docs.state === "skipped") return null;
+  if (docs.state === "loading") return [{ kind: "text", text: w(locale, "docLoading") }];
+  if (docs.state === "error") return [{ kind: "text", text: w(locale, "docDocsError", { message: docs.message }) }];
+  const lines: DocLine[] = docs.files.map((f) => ({ kind: "file", path: f.path, body: f.body, note: f.why ? w(locale, WHY[f.why]) : null }));
+  if (!docs.files.length) lines.push({ kind: "text", text: w(locale, "docDocsNone") });
+  if (docs.more > 0) lines.push({ kind: "text", text: w(locale, "docDocsMore", { n: docs.more }) });
+  if (docs.files.length) lines.push({ kind: "text", text: w(locale, `orchChangesAt_${docs.at}`) }); // which tree, as the «Changes» tab says
+  return lines;
+}
+
+function takeLines(locale: LocaleId, view: OrchestrationRunView, take: OrchestrationTake | null): DocLine[] {
+  if (view.workMode === "project") return [{ kind: "text", text: w(locale, "docTakeInPlace") }];
+  const taken = takenLines(locale, take);
+  if (taken.length) return taken.map((text) => ({ kind: "text", text }));
+  return [{ kind: "text", text: view.workMode === "worktree" ? w(locale, "docTakeWorktree", { branch: view.progress?.branch ?? "?" }) : w(locale, "docTakeCopy") }];
+}
+
+export function resultDoc(input: DocInput, docs: CreatedDocs, locale: LocaleId): RunDoc {
+  const { view, model } = input;
+  const say = (k: string, v: Record<string, string | number> = {}) => w(locale, k, v);
+  const head: DocLine[] = [{ kind: "text", text: say(saidKey(view, `orchSumOutcome_${outcomeKey(view, model.finalVerdict, model.complete)}`)) }];
+  if (model.checkCounts.total > 0) head.push({ kind: "text", text: say("docChecksLine", model.checkCounts) });
+  const findings = view.progress?.findings;
+  if (findings) head.push({ kind: "text", text: say("docBlockingLine", { n: findings.openBlocking }) });
+  head.push({ kind: "text", text: say("docSeeSummary") });
+  const sections: DocSection[] = [{ heading: say("docOutcome"), lines: head }];
+
+  const done = (model.stages ?? []).filter((s) => s.state === "done");
+  sections.push({ heading: say("docDone"), lines: done.length ? done.map((s): DocLine => {
+    const text = s.report ? input.report(s.report.sha256) : null;
+    const parts = text && text !== "loading" && text !== "error" ? reportParts(text) : null;
+    const summary = parts ? parts.summary ?? parts.text ?? say("docNotSaid") : loaded(locale, text);
+    return { kind: "text", text: `${s.title ?? `${say("orchStage")} ${s.n}`}: ${summary}`, said: say("docByExecutor") };
+  }) : [{ kind: "text", text: say("docNothingYet") }] });
+
+  const c = view.progress?.conditions ?? null;
+  if (c) sections.push({ heading: say("docRequirements"), lines: requirementLines(locale, c) });
+  const created = createdLines(locale, docs);
+  if (created) sections.push({ heading: say("docDocs"), lines: created });
+  sections.push({ heading: say("docTake"), lines: takeLines(locale, view, input.take) });
+  return { title: say("docResultTitle", { name: docName(input) }), asOf: say("docAsOf", { time: hhmm(locale, input.asOf) }), sections };
 }

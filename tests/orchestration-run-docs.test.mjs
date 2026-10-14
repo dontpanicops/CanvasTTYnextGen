@@ -2,7 +2,7 @@
 // journal, never invented; the text of a created document read back from its diff; the same document as markdown.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addedText, pickDocs, toMarkdown, noteText, NOTE_MAX, planDoc, stageTask } from "../src/renderer/src/features/orchestration/runDocs.ts";
+import { addedText, pickDocs, toMarkdown, noteText, NOTE_MAX, planDoc, resultDoc, stageTask } from "../src/renderer/src/features/orchestration/runDocs.ts";
 
 const diffOf = (lines) => ({ path: "docs/a.md", truncated: false, text: [
   "diff --git a/docs/a.md b/docs/a.md", "new file mode 100644", "index 0000000..1111111", "--- /dev/null", "+++ b/docs/a.md",
@@ -143,4 +143,56 @@ test("planDoc: a v1 run (no conditions) has stages and no requirements", () => {
 test("planDoc: without a board task the title is the goal's first line", () => {
   assert.equal(planDoc(input({ task: null }), "ru").title, "Разобрать бизнес-логику — план");
   assert.equal(planDoc(input({ task: null, goal: "loading" }), "ru").title, "abcdef12 — план");
+});
+
+const report = (summary) => JSON.stringify({ summary, done: true });
+const done = (over = {}) => input({
+  view: view({ status: "completed", progress: { conditions: COND, findings: { items: [], disputed: [], openBlocking: 0 }, checks: [], finish: [], completion: "no_checks" } }),
+  model: model({ stages: [stage(1, "done", { report: { sha256: "r1", bytes: 10 } }), stage(2, "done", { report: null })], finalVerdict: "complete" }),
+  report: (sha) => (sha === "r1" ? report("разбор записан в docs/a.md") : "error"), ...over });
+const ready = (files, more = 0) => ({ state: "ready", at: "checkpoint", files, more });
+
+test("resultDoc: the outcome line is the summary's own words; no checks is never «confirmed»", () => {
+  const doc = resultDoc(done(), ready([]), "ru");
+  assert.equal(doc.title, "T-1 · Разбор — результат");
+  const head = doc.sections[0];
+  assert.equal(head.heading, "Итог");
+  assert.equal(head.lines[0].text, "Проверяющий подтвердил цель финальным ревью, но команды проверки не запускались: результат ничем не подтверждён.");
+  assert.ok(head.lines.some((l) => l.text === "Открытых блокирующих замечаний: 0."));
+});
+
+test("resultDoc: what was done is the executor's word, marked; requirements carry their marks", () => {
+  const doc = resultDoc(done(), ready([]), "ru");
+  const d = doc.sections.find((s) => s.heading === "Что сделано");
+  assert.equal(d.lines[0].text, "Этап-1: разбор записан в docs/a.md");
+  assert.equal(d.lines[0].said, "со слов исполнителя");
+  assert.equal(d.lines[1].text, "Этап-2: не указано");
+  assert.deepEqual(doc.sections.find((s) => s.heading === "Требования").lines.map((l) => l.mark), ["met", "dropped"]);
+});
+
+test("resultDoc: created documents — their text, why one has none, the rest counted; skipped when not read", () => {
+  const doc = resultDoc(done(), ready([{ path: "docs/a.md", body: "# A\n", why: null }, { path: "docs/big.md", body: null, why: "too_large" }], 2), "ru");
+  const s = doc.sections.find((x) => x.heading === "Созданные документы");
+  assert.deepEqual(s.lines.slice(0, 2).map((l) => [l.kind, l.path, l.body, l.note]), [
+    ["file", "docs/a.md", "# A\n", null], ["file", "docs/big.md", null, "Документ больше 256 КиБ — откройте его во вкладке «Изменения»."]]);
+  assert.ok(s.lines.some((l) => l.text === "Ещё 2 — во вкладке «Изменения»."));
+  assert.ok(!resultDoc(done(), { state: "skipped" }, "ru").sections.some((x) => x.heading === "Созданные документы"));
+  const err = resultDoc(done(), { state: "error", message: "копии нет" }, "ru").sections.find((x) => x.heading === "Созданные документы");
+  assert.equal(err.lines[0].text, "Не удалось прочитать изменения: копии нет");
+  assert.ok(resultDoc(done(), ready([]), "ru").sections.find((x) => x.heading === "Созданные документы").lines.some((l) => l.text === "Задача не создала документов."));
+});
+
+test("resultDoc: how to take it — copy, worktree branch, in place, already taken", () => {
+  const take = (doc) => doc.sections.find((s) => s.heading === "Как забрать").lines.map((l) => l.text);
+  assert.match(take(resultDoc(done(), ready([]), "ru"))[0], /^Результат в отдельной копии/);
+  assert.match(take(resultDoc(done({ view: view({ status: "completed", workMode: "project" }) }), ready([]), "ru"))[0], /^Запуск работал в вашей рабочей папке/);
+  assert.match(take(resultDoc(done({ view: view({ status: "completed", workMode: "worktree", progress: { ...view().progress, branch: "canvastty/t-1" } }) }), ready([]), "ru"))[0], /`canvastty\/t-1`/);
+  const taken = { mode: "copy", from: "checkpoint", stage: 1, files: 3, allowed: true, suggested: "raoden/x", runBranch: null, branch: { name: "raoden/t-1", at: "2026-10-11T10:00:00Z" }, applied: null };
+  assert.ok(take(resultDoc(done({ take: taken }), ready([]), "ru"))[0].includes("raoden/t-1"));
+});
+
+test("resultDoc: nothing done yet says so", () => {
+  const doc = resultDoc(input({ model: model({ stages: null }) }), { state: "loading" }, "ru");
+  assert.equal(doc.sections.find((s) => s.heading === "Что сделано").lines[0].text, "Пока нечего показать.");
+  assert.equal(doc.sections.find((s) => s.heading === "Созданные документы").lines[0].text, "загружается…");
 });
