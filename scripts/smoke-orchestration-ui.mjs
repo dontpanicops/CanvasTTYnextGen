@@ -213,6 +213,19 @@ try {
   await openTab(app, "plan");
   await app.waitFor(`${q('[data-run-doc="plan"]')}?.textContent.includes("Заметка")`, "plan tab shows the stage");
   expect(true, "completed: the plan tab shows the stage", null);
+  // «To the canvas»: a snapshot note, marked as a copy; «Open current» leads back to the run's plan tab
+  const notesBefore = await app.ev(`document.querySelectorAll("[data-sticky-note-id]").length`);
+  await app.clickEl(q("[data-run-doc-note]"));
+  await app.waitFor(`document.querySelectorAll("[data-sticky-note-id]").length === ${notesBefore} + 1`, "a note added");
+  const note = `[...document.querySelectorAll("[data-sticky-note-id]")].at(-1)`;
+  const snapText = await app.ev(`${note}.querySelector("textarea").value`);
+  expect(snapText.startsWith("> Копия документа на ") && snapText.includes("план"), "«To the canvas»: a note marked as a copy of when", snapText.slice(0, 120));
+  expect(await app.ev(`${note}.querySelector('[data-note-source="plan"]') !== null`), "the note shows it is a snapshot of the plan", null);
+  await app.clickEl(q(".orch-panel__close"));
+  await app.waitFor(`${q(".orch-panel")} === null`, "panel closed");
+  await app.clickEl(`${note}.querySelector("[data-note-open-source]")`);
+  await app.waitFor(`${q('[data-run-doc="plan"]')} && true`, "«Open current» opens the run's plan tab");
+  expect(true, "«Open current» on the note opens the current plan", null);
   await openTab(app, "history");
   await app.reveal(`${failedCheck}`);
   await app.shot("06b-history-details");

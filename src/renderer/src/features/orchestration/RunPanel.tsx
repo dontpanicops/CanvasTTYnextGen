@@ -1043,7 +1043,6 @@ function useCreatedDocs(locale: LocaleId, runId: string, seq: number, skip: bool
   const [attempt, setAttempt] = useState(0);
   const cache = useRef(new Map<string, CreatedFile>());
   const shown = useRef(0);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: seq and attempt are the triggers
   useEffect(() => {
     if (skip) { setDocs({ state: "skipped" }); return; }
     // «loading» again when the tab was skipped, after an error, or on a repeat; a moving run keeps the list it shows

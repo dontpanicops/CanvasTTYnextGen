@@ -53,3 +53,14 @@ test("sticky-note persistence caps valid notes instead of raw input rows", () =>
   assert.equal(notes[0].id, "note-0");
   assert.equal(notes.at(-1).id, "note-127");
 });
+
+test("a note keeps where its snapshot came from; a bad source is dropped, the note kept", () => {
+  const base = { id: "note-1", text: "> Копия", position: { x: 0, y: 0 }, size: { width: 300, height: 220 } };
+  const source = { runId: "a0734db5-0000-4000-8000-000000000000", doc: "plan", at: "2026-10-14T09:30:00.000Z" };
+  assert.deepEqual(normalizeStickyNotes([{ ...base, source }])[0].source, source);
+  for (const bad of [{ ...source, doc: "summary" }, { ...source, runId: "../x" }, { ...source, at: "вчера" }, "plan", null]) {
+    const [n] = normalizeStickyNotes([{ ...base, source: bad }]);
+    assert.equal(n.text, "> Копия");
+    assert.ok(!("source" in n), JSON.stringify(bad));
+  }
+});

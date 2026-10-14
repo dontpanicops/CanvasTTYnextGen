@@ -68,7 +68,20 @@ export const NOTE_MAX = 20_000;
 export function noteText(markdown: string, cut: string): string {
   if (markdown.length <= NOTE_MAX) return markdown;
   const tail = `\n\n${cut}\n`;
-  return `${markdown.slice(0, NOTE_MAX - tail.length)}${tail}`;
+  let end = NOTE_MAX - tail.length;
+  // never cut a surrogate pair in half
+  const last = markdown.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${markdown.slice(0, end)}${tail}`;
+}
+
+// The first line of a snapshot on the canvas: a copy, of when, where the current one is. The time is the person's own.
+export function snapshotText(markdown: string, locale: LocaleId, at: string): string {
+  return `> ${w(locale, "docSnapshotLine", { time: snapshotTime(locale, at) })}\n\n${markdown}`;
+}
+
+export function snapshotTime(locale: LocaleId, at: string): string {
+  return new Date(at).toLocaleString(locale === "ru" ? "ru-RU" : "en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 export type Loaded<T> = T | "loading" | "error";

@@ -28,6 +28,7 @@ import type {
   SessionRowColorMode,
   ShortcutBindings,
   StickyNote,
+  StickyNoteSource,
   ZoomSensitivity
 } from "../../shared/contracts";
 import {
@@ -764,11 +765,22 @@ export function normalizeStickyNotes(
         width: clamp(source.size.width, STICKY_NOTE_MIN_SIZE.width, STICKY_NOTE_MAX_SIZE.width),
         height: clamp(source.size.height, STICKY_NOTE_MIN_SIZE.height, STICKY_NOTE_MAX_SIZE.height)
       },
-      ...workspaceField(source.workspaceId)
+      ...workspaceField(source.workspaceId),
+      ...noteSource(source.source)
     });
     ids.add(source.id);
   }
   return notes;
+}
+
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Where a snapshot note came from, or nothing: a note never loses its text over a bad source.
+function noteSource(value: unknown): { source?: StickyNoteSource } {
+  if (!value || typeof value !== "object") return {};
+  const s = value as Partial<StickyNoteSource>;
+  if (typeof s.runId !== "string" || !RUN_ID.test(s.runId) || (s.doc !== "plan" && s.doc !== "result")) return {};
+  if (typeof s.at !== "string" || s.at.length > 40 || Number.isNaN(Date.parse(s.at))) return {};
+  return { source: { runId: s.runId, doc: s.doc, at: s.at } };
 }
 
 function normalizeBrowserCanvas(candidate: unknown, fallback: BrowserCanvasState | null): BrowserCanvasState | null {

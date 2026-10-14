@@ -2,7 +2,7 @@
 // journal, never invented; the text of a created document read back from its diff; the same document as markdown.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addedText, readCreatedFile, pickDocs, toMarkdown, noteText, NOTE_MAX, planDoc, resultDoc, stageTask } from "../src/renderer/src/features/orchestration/runDocs.ts";
+import { addedText, readCreatedFile, pickDocs, toMarkdown, noteText, NOTE_MAX, planDoc, resultDoc, snapshotText, stageTask } from "../src/renderer/src/features/orchestration/runDocs.ts";
 
 const diffOf = (lines) => ({ path: "docs/a.md", truncated: false, text: [
   "diff --git a/docs/a.md b/docs/a.md", "new file mode 100644", "index 0000000..1111111", "--- /dev/null", "+++ b/docs/a.md",
@@ -234,4 +234,27 @@ test("resultDoc: a worktree run without a branch in the view says copy, not a qu
   const doc = resultDoc(done({ view: view({ status: "completed", workMode: "worktree", progress: { ...view().progress, branch: undefined } }) }), ready([]), "ru");
   const t = doc.sections.find((s) => s.heading === "Как забрать").lines[0].text;
   assert.ok(!t.includes("?") && /^Результат в отдельной копии/.test(t), t);
+});
+
+test("snapshotText: the first line says it is a copy and of when; the document follows unchanged", () => {
+  const got = snapshotText("# T-1 — план\n\nтекст\n", "ru", "2026-10-14T09:30:00.000Z");
+  const [first, empty, ...rest] = got.split("\n");
+  assert.match(first, /^> Копия документа на \d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}\. Актуальный — «Открыть актуальный» на заметке или вкладка запуска\.$/);
+  assert.equal(empty, "");
+  assert.equal(rest.join("\n"), "# T-1 — план\n\nтекст\n");
+});
+
+test("noteText over snapshotText: the copy line survives the cut, the whole note fits NOTE_MAX", () => {
+  const got = noteText(snapshotText("x".repeat(NOTE_MAX), "ru", "2026-10-14T09:30:00.000Z"), "… обрезано");
+  assert.ok(got.startsWith("> Копия документа на "));
+  assert.equal(got.length, NOTE_MAX);
+});
+
+test("noteText: a cut on a surrogate pair drops the whole pair", () => {
+  const cut = "… обрезано";
+  const room = NOTE_MAX - `\n\n${cut}\n`.length;
+  const got = noteText("x".repeat(room - 1) + "😀" + "y".repeat(100), cut);
+  assert.ok(!/[\uD800-\uDBFF]\n\n/.test(got), "no lone high surrogate before the cut line");
+  assert.ok(got.length <= NOTE_MAX);
+  assert.ok(got.endsWith(`\n\n${cut}\n`));
 });

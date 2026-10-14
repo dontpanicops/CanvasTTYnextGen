@@ -28,12 +28,13 @@ import { HomeZone } from "../home/HomeZone";
 import { RadialLauncher } from "../launcher/QuickRadialMenu";
 import { StickyNoteCard } from "../notes/StickyNoteCard";
 import { stickyNoteAtPoint } from "../notes/stickyNoteBounds";
+import { noteText, snapshotText } from "../orchestration/runDocs";
 import { AgentScene } from "../orchestration/AgentScene";
 import { BOARD_SIZE, BoardCard } from "../orchestration/BoardCard";
 import { useBoard } from "../orchestration/useBoard";
 import { OrchestrationOverlays } from "../orchestration/OrchestrationDialogs";
 import { activityRuns } from "../orchestration/runStatus";
-import { useAgentCanvasUi } from "../orchestration/useAgentCanvasUi";
+import { useAgentCanvasUi, type PanelTab } from "../orchestration/useAgentCanvasUi";
 import { useOrchestration } from "../orchestration/useOrchestration";
 import { NotifyBanner, useRunNotifications } from "../orchestration/useRunNotifications";
 import { PluginCanvasCard } from "../plugins/PluginCanvasCard";
@@ -251,7 +252,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   });
   const [wsDialog, setWsDialog] = useState<WorkspaceDialog | null>(null);
   // From the widget or the history: the run's own workspace, its lead card in view, its panel.
-  const openRunInWorkspace = useCallback((runId: string, tab?: "summary", target = ownerOfRun(runId)): void => {
+  const openRunInWorkspace = useCallback((runId: string, tab?: PanelTab, target = ownerOfRun(runId)): void => {
     workspace.switchTo(target);
     const link = orch.canvas.links.find((l) => l.runIds.at(-1) === runId);
     const lead = link ? orch.canvas.agents.find((a) => a.agentId === link.fromAgentId) : undefined;
@@ -668,6 +669,13 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     setContextMenu(null);
     setCommandPaletteOpen(false);
   }, [onCreateStickyNote]);
+  // a run document's snapshot as a note in the middle of the view (plan-result-docs.md §5): marked as a copy of when,
+  // with the way back to the current one; App puts it in the active workspace, like any new note
+  const noteFromText = useCallback((markdown: string, from: { runId: string; doc: "plan" | "result" }): void => {
+    const at = new Date().toISOString();
+    const text = noteText(snapshotText(markdown, settings.locale, at), t(settings.locale, "docNoteCut"));
+    onCreateStickyNote({ ...stickyNoteAtPoint(viewportCenterWorldPoint(), crypto.randomUUID()), text, source: { ...from, at } });
+  }, [onCreateStickyNote, settings.locale, viewportCenterWorldPoint]);
   const launchAt = useCallback((provider: ProviderId, point?: Point): void => {
     if (provider === "terminal") onOpenTerminal(point);
     else onOpenAgent(provider, point);
@@ -1053,6 +1061,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               onBoundsChange={onStickyNoteBoundsChange}
               onTextChange={onStickyNoteTextChange}
               onClose={onDeleteStickyNote}
+              onOpenSource={(s) => openRunInWorkspace(s.runId, s.doc)}
               groupSelected={marqueeSelection.has(noteLayerId(note.id))}
             />
           ))}
@@ -1259,7 +1268,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         />
       )}
 
-      <OrchestrationOverlays taskOfRun={board.taskOfRun} orch={orch} ui={agentUi} locale={settings.locale} defaultProject={settings.lastDirectory} folderBusy={folderBusy} />
+      <OrchestrationOverlays taskOfRun={board.taskOfRun} orch={orch} ui={agentUi} locale={settings.locale} defaultProject={settings.lastDirectory} folderBusy={folderBusy} onNoteFromText={noteFromText} />
       <NotifyBanner locale={settings.locale} notes={notes.banner} onOpen={notes.openNote} onDismiss={notes.dismiss} />
       <WorkspaceDialogs dialog={wsDialog} controls={workspace} orch={orch} layout={workspaceLayout} locale={settings.locale}
         onClose={() => setWsDialog(null)} onOpenRun={(runId) => openRunInWorkspace(runId)} />
