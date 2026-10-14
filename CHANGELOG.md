@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## 1.5.19 — 2026-10-14
+
+The run's plan and result as documents to read, copy and put on the canvas; «Copied» only when it is.
+
+- Two new tabs of the run panel, first: «Plan» — the goal, the requirements, each stage with its task, its conditions (what confirms each, which requirements it covers) and its state, replans folded; «Result» — the outcome in one line (the same words as «Summary»), checks passed and open blocking findings, what was done (marked as the executor's words), the requirements with their marks, the documents the run created and how to take the result. «Summary» stays the detailed report.
+- A document the run created (.md, .markdown, .txt, up to 10) is shown in full, read exactly from the run's tree — the one «Changes» shows — and still readable after the copy or the worktree is gone. Only when that read fails is it rebuilt from the diff, and then it says so.
+- «Copy» puts a document in the clipboard as markdown. «To the canvas» makes a note of it: a snapshot marked «Copy as of <time>» with «Open current», which opens the run's tab. The note is yours to edit; the run does not change.
+- At the end of a run «Open the result» leads to «Result». At the plan review the stage list in the header became «Open the plan». A task card on the board has «Plan» and «Result» while it has a run.
+- The clipboard answers: «Copied» (and «Code copied» for the GitHub sign-in code) shows only when the text is in the clipboard; otherwise «Could not copy».
+- Formats: a note in settings.json may carry an optional `source` (run, document, time); older versions drop it and keep the text. The journal, board.json and canvas.json do not change.
+- No model call added; checked on fake CLIs, in the app built from source and in the packaged one.
+
 ## 1.5.18 — 2026-10-10
 
 Dependencies through the board's result, worktrees in parallel, overlap warnings, a start queue and the result updated from your HEAD.
