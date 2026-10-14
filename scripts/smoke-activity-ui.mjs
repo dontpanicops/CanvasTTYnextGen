@@ -176,6 +176,9 @@ try {
 
   // ---------- 5. the summary ----------
   await app.clickEl(q("[data-orch-ended] button"));
+  // the offer opens the Result document; the report with its sources is the "Итог" tab
+  await app.waitFor(`${q(".orch-panel")}.dataset.orchPanelTab === "result"`, "the offer leads to the result");
+  await app.clickEl(q('[data-orch-tab="summary"]'));
   // v1: the lead's remarks of its final review; v2: the reviewer's findings (the final review's remarks as wishes)
   await app.waitFor(`${q("[data-orch-run-summary]")} && ${q(V2 ? "[data-finding]" : '[data-sum="remarks"] [data-sum-findings]')} && true`, "summary loaded", 20_000);
   const sum = await app.ev(`${q("[data-orch-run-summary]")}.innerText`);
