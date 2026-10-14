@@ -101,15 +101,16 @@ function docName(input: DocInput): string {
 
 // A stage's task: the newest plan that names it (a replan names its stages from its firstStage on; a stage before that
 // keeps the task of the plan it was done under). An unread plan is said as such, never filled from an older one.
-export function stageTask(plans: readonly PlanEntry[], n: number): Loaded<string> | null {
+const stageField = (plans: readonly PlanEntry[], n: number, field: "task" | "title"): Loaded<string> | null => {
   for (let i = plans.length - 1; i >= 0; i -= 1) {
     const p = plans[i];
     if (p.firstStage > n) continue;
     if (p.text === "loading" || p.text === "error") return p.text;
-    return p.text.stages[n - p.firstStage]?.task ?? null;
+    return p.text.stages[n - p.firstStage]?.[field] ?? null;
   }
   return null;
-}
+};
+export const stageTask = (plans: readonly PlanEntry[], n: number): Loaded<string> | null => stageField(plans, n, "task");
 
 const evidenceText = (locale: LocaleId, e: OrchestrationConditions["conditions"][number]["evidence"]): string =>
   e.kind === "check" ? w(locale, "docEvidenceCheck", { cmd: e.command ?? e.check }) : w(locale, e.kind === "change" ? "docEvidenceChange" : "docEvidencePerson");
@@ -129,6 +130,7 @@ export function planDoc(input: DocInput, locale: LocaleId): RunDoc {
   const sections: DocSection[] = [{ heading: say("docGoal"), lines: goalLines(locale, input.goal) }];
   if (c) sections.push({ heading: say("docRequirements"), lines: requirementLines(locale, c) });
   if (!model.stages?.length) sections.push({ heading: say("orchSum_stages"), lines: [{ kind: "text", text: say("docStagesPending") }] });
+  if (model.stages?.length) sections.push({ heading: say("orchSum_stages"), lines: [{ kind: "text", text: say("docPlanByLead") }] });
   for (const st of model.stages ?? []) {
     const lines: DocLine[] = [{ kind: "text", text: loaded(locale, stageTask(plans, st.n)) }];
     const conds = c?.conditions.filter((x) => x.stage === st.n) ?? [];
@@ -137,7 +139,7 @@ export function planDoc(input: DocInput, locale: LocaleId): RunDoc {
       text: `${x.id} ${x.text} — ${evidenceText(locale, x.evidence)}${x.covers.length ? `; ${say("docCovers", { ids: x.covers.join(", ") })}` : ""}`
     })));
     const state = !model.complete && st.state !== "done" ? "orchSumStage_unloaded" : saidKey(view, `orchSumStage_${st.state}`);
-    sections.push({ heading: say("docStageHeading", { n: st.n, title: st.title ?? say("docNotSaid"), state: say(state) }), lines });
+    sections.push({ heading: say("docStageHeading", { n: st.n, title: loaded(locale, st.title ?? stageField(plans, st.n, "title")), state: say(state) }), lines });
   }
   const replans = plans.filter((p) => p.version > 1);
   const dropped = c?.dropped ?? [];

@@ -120,9 +120,18 @@ test("planDoc: a replan names its stages from its first stage on; the dropped co
 test("planDoc: an unread plan says so, a missing one is not invented", () => {
   const loading = planDoc(input({ plans: [{ version: 1, firstStage: 1, text: "loading" }], goal: "loading" }), "ru");
   assert.equal(lines(loading).filter((l) => l === "загружается…").length, 3); // goal + two stages
+  const untitled = planDoc(input({ model: model({ stages: [stage(1, "done", { title: null })] }), plans: [{ version: 1, firstStage: 1, text: "loading" }] }), "ru");
+  assert.ok(lines(untitled).includes("Этап 1: загружается… — выполнен — принят лидом"));
+  const errored = planDoc(input({ model: model({ stages: [stage(1, "done", { title: null })] }), plans: [{ version: 1, firstStage: 1, text: "error" }] }), "ru");
+  assert.ok(lines(errored).some((l) => l.startsWith("Этап 1: не удалось прочитать — ")));
+  const p2 = { version: 2, firstStage: 2, text: "loading" };
+  assert.equal(stageTask([plan1, p2], 2), "loading");
+  assert.equal(stageTask([plan1, p2], 1), "Записать разбор");
   assert.equal(stageTask([{ version: 1, firstStage: 1, text: "error" }], 2), "error");
   const none = planDoc(input({ model: model({ stages: null, stageCounts: null }), plans: [] }), "ru");
   assert.ok(lines(none).includes("Лид ещё составляет план."));
+  assert.ok(!lines(none).includes("Этапы, задания и условия — со слов лида."));
+  assert.ok(lines(planDoc(input(), "ru")).includes("Этапы, задания и условия — со слов лида."));
 });
 
 test("planDoc: a v1 run (no conditions) has stages and no requirements", () => {
