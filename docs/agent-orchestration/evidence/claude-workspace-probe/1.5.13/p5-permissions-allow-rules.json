@@ -114,7 +114,7 @@
           "subtype": "can_use_tool",
           "tool": "Bash",
           "input": {
-            "command": "cd \"apps/api/src/career_os\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
+            "command": "cd \"apps/api/src/acme_shop\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
             "description": "List router endpoints and functions per module"
           },
           "why": {
@@ -163,9 +163,9 @@
         {
           "kind": "tool",
           "tool": "Bash",
-          "summary": "cd \"apps/api/src/career_os\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
+          "summary": "cd \"apps/api/src/acme_shop\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
           "input": {
-            "command": "cd \"apps/api/src/career_os\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
+            "command": "cd \"apps/api/src/acme_shop\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
             "description": "List router endpoints and functions per module"
           },
           "options": [
@@ -207,14 +207,14 @@
         {
           "tool": "Bash",
           "input": {
-            "command": "cd \"apps/api\" && bash -c '\nsed -n 386,436p tests/analysis/test_analysis_api.py\ngrep -niE \"market_snapshot|market\" src/career_os/modules/analysis/{service,models,schemas,domain}.py | head -20\ngrep -rniE \"31|legacy|n=2|trend|stale|ttl\" src/career_os/providers/market.py | head'",
+            "command": "cd \"apps/api\" && bash -c '\nsed -n 386,436p tests/analysis/test_analysis_api.py\ngrep -niE \"market_snapshot|market\" src/acme_shop/modules/analysis/{service,models,schemas,domain}.py | head -20\ngrep -rniE \"31|legacy|n=2|trend|stale|ttl\" src/acme_shop/providers/market.py | head'",
             "description": "Show test lines and grep market references"
           }
         },
         {
           "tool": "Bash",
           "input": {
-            "command": "cd \"apps/api/src/career_os\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
+            "command": "cd \"apps/api/src/acme_shop\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
             "description": "List router endpoints and functions per module"
           }
         },
@@ -300,7 +300,7 @@
             "tool_name": "Bash",
             "tool_use_id": "toolu_01Fj6XcgnthFXs6KtTqJoKxj",
             "tool_input": {
-              "command": "cd \"apps/api/src/career_os\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
+              "command": "cd \"apps/api/src/acme_shop\" && for f in modules/*/api.py; do echo \"== $f\"; grep -nE -A3 '@router\\.(get|post|put|patch|delete)\\($' $f | grep -E '\"/' ; grep -nE '^(async )?def ' $f; done",
               "description": "List router endpoints and functions per module"
             }
           },

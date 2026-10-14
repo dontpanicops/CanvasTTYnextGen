@@ -24,7 +24,7 @@ const passed = [];
 const notes = {};
 const expect = (ok, what, got) => { (ok ? passed : failures).push(ok ? what : `${what}: ${JSON.stringify(got)?.slice(0, 600)}`); };
 
-const alpha = project("career-os-analysis-market-snapshot-service");
+const alpha = project("acme-shop-analysis-market-snapshot-service");
 const planV2 = { report: { stages: [{ title: "Рыночный снимок", task: "Add src/note.mjs and the files", conditions: [
   { keep: null, text: "node --test passes", covers: ["R1"], evidence: { kind: "check", check: "cmd-1" } }] }], dropped: [], dropRequirements: [], question: null } };
 const plan = JOURNAL_V2 ? planV2 : { report: { stages: [{ title: "Рыночный снимок", task: "Add src/note.mjs" }], question: null } };

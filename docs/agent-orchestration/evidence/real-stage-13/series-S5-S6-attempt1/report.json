@@ -670,8 +670,8 @@
           },
           {
             "file": "activity.jsonl",
-            "bytes": 43775,
-            "sha256": "e530e55c8b09c59087a429c783c4de7b4579971143d8094f0d103e725f2aba70"
+            "bytes": 43675,
+            "sha256": "1fcf92b02d25143646b83591a4582e52ee3371dd0e3eee4669ccf403a8b1e71b"
           },
           {
             "file": "project-folder.json",
