@@ -67,7 +67,7 @@ const api: CanvasTTYApi = {
   },
   clipboard: {
     readText: () => ipcRenderer.invoke(IPC.clipboardRead),
-    writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text)
+    writeText: (text: string) => ipcRenderer.invoke(IPC.clipboardWrite, text)
   },
   external: {
     openUrl: (url: string) => ipcRenderer.invoke(IPC.externalOpenUrl, url)
