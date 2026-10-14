@@ -1003,6 +1003,11 @@ function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" |
   const [copied, setCopied] = useState(false);
   const [noted, setNoted] = useState(false);
   useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  useEffect(() => {
     if (!noted) return;
     const timer = window.setTimeout(() => setNoted(false), 2000);
     return () => window.clearTimeout(timer);
@@ -1027,7 +1032,7 @@ function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" |
   return (
     <article className="orch-doc" data-run-doc={kind}>
       <div className="orch-doc__actions">
-        <button type="button" data-run-doc-copy onClick={() => { void window.canvasTTY.clipboard.writeText(md); setCopied(true); }}>{t(locale, copied ? "docCopied" : "docCopy")}</button>
+        <button type="button" data-run-doc-copy onClick={() => { void Promise.resolve(window.canvasTTY.clipboard.writeText(md)).then(() => setCopied(true), () => setCopied(false)); }}>{t(locale, copied ? "docCopied" : "docCopy")}</button>
         {onNote && <button type="button" data-run-doc-note onClick={() => { onNote(md); setNoted(true); }}>{t(locale, noted ? "docOnCanvas" : "docToCanvas")}</button>}
       </div>
       <h3>{doc.title}</h3>

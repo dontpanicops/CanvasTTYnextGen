@@ -221,6 +221,8 @@ try {
   const snapText = await app.ev(`${note}.querySelector("textarea").value`);
   expect(snapText.startsWith("> Копия документа на ") && snapText.includes("— план"), "«To the canvas»: a note marked as a copy of when", snapText.slice(0, 120));
   expect(await app.ev(`${note}.querySelector('[data-note-source="plan"]') !== null`), "the note shows it is a snapshot of the plan", null);
+  const label = await app.ev(`(() => { const s = ${note}.querySelector("[data-note-source] > span"); return { text: s.textContent, fits: s.scrollWidth <= s.clientWidth }; })()`);
+  expect(label.fits && /^Копия на .*\d{2}:\d{2}/.test(label.text), "the snapshot label shows its time in full", JSON.stringify(label));
   expect((await app.ev(`${q("[data-run-doc-note]")}.textContent`)) === "На холсте ✓", "«To the canvas» answers on the button", null);
   const noteBtn = `${note}.querySelector("[data-note-open-source]")`;
   const hit = await app.ev(`(() => { const b = ${noteBtn}.getBoundingClientRect(); const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e !== null && ${noteBtn}.contains(e); })()`);
