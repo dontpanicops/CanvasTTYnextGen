@@ -83,7 +83,7 @@ import {
   type RunAction,
   type RunDigest
 } from "./runModel";
-import { duration, findingsLine, finishText, isServiceEntry, outcomeKey, personDecisionsLine, readJournal, reportParts, summaryModel, type ReportParts, type RunJournalState, type TextRef } from "./runStatus";
+import { duration, findingsLine, finishText, isServiceEntry, outcomeKey, personDecisionsLine, readJournal, reportParts, saidKey, summaryModel, type ReportParts, type RunJournalState, type TextRef } from "./runStatus";
 import type { PanelRole, PanelState, PanelTab } from "./useAgentCanvasUi";
 import { outcomeText, type Orchestration, type RunActivityState } from "./useOrchestration";
 
@@ -101,9 +101,6 @@ export function Differences({ locale }: { locale: LocaleId }): React.JSX.Element
 const SILENCE_MS = 15_000;
 const api = () => window.canvasTTY.orchestration;
 const tr = (locale: LocaleId, key: string): string => t(locale, key as TranslationKey) ?? key;
-// The result's words that name the lead as the one who accepts and concludes; a run the reviewer reviews has its own (A3)
-const REVIEWER_WORDS = ["orchSumOutcome_completed", "orchSumOutcome_completed_no_checks", "orchSumStages_count", "orchSumStages_countPartial", "orchSumStage_done",
-  "orchSumStage_not_done", "orchSumStage_not_checked", "orchSum_lead", "orchSumRemarksNone", "orchSumCurrentReview", "orchSumCurrentReviewPartial"];
 const time = (locale: LocaleId, ts: string | null) => (ts ? new Date(ts).toLocaleTimeString(locale) : "—");
 // A key the dictionary has (dynamic keys built from main's values may be missing).
 const known = (locale: LocaleId, key: string): boolean => (t(locale, key as TranslationKey) as string | undefined) !== undefined;
@@ -832,7 +829,7 @@ function RunSummary({ orch, runId, view, records, locale, changedFiles, gaps, in
   const outcome = outcomeKey(view, m.finalVerdict, m.complete);
   // Read only in part: what was read stands, but nothing is concluded from what was not read yet.
   // A3: a run the reviewer reviews says so — the application accepts its stages, the reviewer concludes
-  const said = (key: string) => tr(locale, byReviewer(view) && REVIEWER_WORDS.includes(key) ? `${key}_rv` : key);
+  const said = (key: string) => tr(locale, saidKey(view, key));
   const stageStateText = (st: { state: string }) => said(!m.complete && st.state !== "done" ? "orchSumStage_unloaded" : `orchSumStage_${st.state}`);
   const progress = view.progress ?? null;
   const verdictText = (v: string | null) => (v ? tr(locale, `orchVerdict_${v}`) : "—");

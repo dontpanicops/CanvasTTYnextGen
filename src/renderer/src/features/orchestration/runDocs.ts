@@ -1,7 +1,10 @@
 // The run's plan and result documents (docs/agent-orchestration/implementation/plan-result-docs.md): what the person
 // reads in a minute, derived from the journal and the run's view — never stored, nothing in them is the agents' proof.
 // One RunDoc feeds both the panel's view and the markdown (copy, a note on the canvas), so the two never differ.
-import type { OrchestrationChanges, OrchestrationDiff } from "../../../../shared/orchestration.ts";
+import type { LocaleId } from "../../../../shared/contracts.ts";
+import type { OrchestrationChanges, OrchestrationConditions, OrchestrationDiff, OrchestrationRunView, OrchestrationTake } from "../../../../shared/orchestration.ts";
+import { t, type TranslationKey } from "../../lib/i18n.ts";
+import { saidKey, type RunSummaryModel } from "./runStatus.ts";
 
 export type DocMark = "met" | "not_met" | "not_checked" | "dropped" | "open";
 // said: whose word the line is («со слов исполнителя»), already in the person's language
@@ -65,4 +68,86 @@ export function noteText(markdown: string, cut: string): string {
   if (markdown.length <= NOTE_MAX) return markdown;
   const tail = `\n\n${cut}\n`;
   return `${markdown.slice(0, NOTE_MAX - tail.length)}${tail}`;
+}
+
+export type Loaded<T> = T | "loading" | "error";
+export interface PlanJson { stages: { title: string; task: string }[]; question: string | null }
+// one recorded plan, in journal order: version 1, 2, …; firstStage — the global number of its first stage
+export interface PlanEntry { version: number; firstStage: number; text: Loaded<PlanJson> }
+export interface DocInput {
+  view: OrchestrationRunView;
+  model: RunSummaryModel;
+  task: { key: string; title: string } | null;
+  goal: Loaded<{ text: string | null }>;
+  plans: readonly PlanEntry[];
+  report(sha256: string): Loaded<string>; // an executor's report text, read through the shared text cache
+  take: OrchestrationTake | null;
+  asOf: string; // ISO time the document describes
+}
+
+const fill = (s: string, vars: Record<string, string | number>): string =>
+  Object.entries(vars).reduce((a, [k, v]) => a.replaceAll(`{${k}}`, String(v)), s);
+const w = (locale: LocaleId, key: string, vars: Record<string, string | number> = {}): string => fill(t(locale, key as TranslationKey), vars);
+const hhmm = (locale: LocaleId, iso: string): string => new Date(iso).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+const loaded = (locale: LocaleId, v: Loaded<string> | null): string =>
+  v === "loading" ? w(locale, "docLoading") : v === "error" ? w(locale, "docUnreadable") : v ?? w(locale, "docNotSaid");
+
+function docName(input: DocInput): string {
+  if (input.task) return `${input.task.key} · ${input.task.title}`;
+  const first = typeof input.goal === "object" && input.goal.text ? input.goal.text.split("\n")[0].trim() : "";
+  if (!first) return input.view.runId.slice(0, 8);
+  return first.length > 80 ? `${first.slice(0, 79)}…` : first;
+}
+
+// A stage's task: the newest plan that names it (a replan names its stages from its firstStage on; a stage before that
+// keeps the task of the plan it was done under). An unread plan is said as such, never filled from an older one.
+export function stageTask(plans: readonly PlanEntry[], n: number): Loaded<string> | null {
+  for (let i = plans.length - 1; i >= 0; i -= 1) {
+    const p = plans[i];
+    if (p.firstStage > n) continue;
+    if (p.text === "loading" || p.text === "error") return p.text;
+    return p.text.stages[n - p.firstStage]?.task ?? null;
+  }
+  return null;
+}
+
+const evidenceText = (locale: LocaleId, e: OrchestrationConditions["conditions"][number]["evidence"]): string =>
+  e.kind === "check" ? w(locale, "docEvidenceCheck", { cmd: e.command ?? e.check }) : w(locale, e.kind === "change" ? "docEvidenceChange" : "docEvidencePerson");
+
+const requirementLines = (locale: LocaleId, c: OrchestrationConditions): DocLine[] => c.requirements.map((r) => ({
+  kind: "item", mark: r.status,
+  text: `${r.id} ${r.text}${r.status === "dropped" && r.why ? ` — ${w(locale, "docDroppedWhy", { why: r.why })}` : ""}`
+}));
+
+const goalLines = (locale: LocaleId, goal: DocInput["goal"]): DocLine[] =>
+  [{ kind: "text", text: loaded(locale, typeof goal === "object" ? goal.text : goal) }];
+
+export function planDoc(input: DocInput, locale: LocaleId): RunDoc {
+  const { view, model, plans } = input;
+  const say = (k: string, v: Record<string, string | number> = {}) => w(locale, k, v);
+  const c = view.progress?.conditions ?? null;
+  const sections: DocSection[] = [{ heading: say("docGoal"), lines: goalLines(locale, input.goal) }];
+  if (c) sections.push({ heading: say("docRequirements"), lines: requirementLines(locale, c) });
+  if (!model.stages?.length) sections.push({ heading: say("orchSum_stages"), lines: [{ kind: "text", text: say("docStagesPending") }] });
+  for (const st of model.stages ?? []) {
+    const lines: DocLine[] = [{ kind: "text", text: loaded(locale, stageTask(plans, st.n)) }];
+    const conds = c?.conditions.filter((x) => x.stage === st.n) ?? [];
+    if (conds.length) lines.push({ kind: "text", text: say("docConditions") }, ...conds.map((x): DocLine => ({
+      kind: "item", mark: x.status,
+      text: `${x.id} ${x.text} — ${evidenceText(locale, x.evidence)}${x.covers.length ? `; ${say("docCovers", { ids: x.covers.join(", ") })}` : ""}`
+    })));
+    const state = !model.complete && st.state !== "done" ? "orchSumStage_unloaded" : saidKey(view, `orchSumStage_${st.state}`);
+    sections.push({ heading: say("docStageHeading", { n: st.n, title: st.title ?? say("docNotSaid"), state: say(state) }), lines });
+  }
+  const replans = plans.filter((p) => p.version > 1);
+  const dropped = c?.dropped ?? [];
+  if (replans.length || dropped.length) sections.push({ heading: say("docReplans"), collapsed: true, lines: [
+    ...replans.map((p): DocLine => ({ kind: "item", text: say("docReplanLine", { v: p.version, stage: p.firstStage }) })),
+    ...dropped.map((d): DocLine => ({ kind: "item", mark: "dropped", text: `${d.id} ${d.text} — ${say("docDroppedWhy", { why: d.why })}` }))
+  ] });
+  const last = plans.at(-1)?.text;
+  if (last && typeof last === "object" && last.question) {
+    sections.push({ heading: say("docQuestion"), lines: [{ kind: "text", text: last.question, said: say("docByLead") }] });
+  }
+  return { title: say("docPlanTitle", { name: docName(input) }), asOf: say("docAsOf", { time: hhmm(locale, input.asOf) }), sections };
 }

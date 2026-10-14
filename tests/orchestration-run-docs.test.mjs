@@ -2,7 +2,7 @@
 // journal, never invented; the text of a created document read back from its diff; the same document as markdown.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addedText, pickDocs, toMarkdown, noteText, NOTE_MAX } from "../src/renderer/src/features/orchestration/runDocs.ts";
+import { addedText, pickDocs, toMarkdown, noteText, NOTE_MAX, planDoc, stageTask } from "../src/renderer/src/features/orchestration/runDocs.ts";
 
 const diffOf = (lines) => ({ path: "docs/a.md", truncated: false, text: [
   "diff --git a/docs/a.md b/docs/a.md", "new file mode 100644", "index 0000000..1111111", "--- /dev/null", "+++ b/docs/a.md",
@@ -66,4 +66,72 @@ test("noteText: a long document is cut with a closing line", () => {
   const got = noteText(long, "… обрезано");
   assert.equal(got.length, NOTE_MAX);
   assert.ok(got.endsWith("\n\n… обрезано\n"));
+});
+
+const COND = {
+  requirements: [
+    { id: "R1", text: "Проект проанализирован", conditions: ["C1"], status: "met" },
+    { id: "R2", text: "Логика понятна", conditions: ["C2"], status: "dropped", why: "лишнее" }],
+  conditions: [
+    { id: "C1", text: "разбор записан", covers: ["R1"], stage: 1, status: "met", evidence: { kind: "change" }, proof: null },
+    { id: "C2", text: "тесты проходят", covers: ["R2"], stage: 2, status: "not_checked", evidence: { kind: "check", check: "cmd-1", command: "node --test" }, proof: null }],
+  dropped: [{ id: "C3", text: "старое условие", covers: ["R2"], why: "заменено" }], met: 1, total: 2 };
+const stage = (n, state, over = {}) => ({ n, plan: 1, title: `Этап-${n}`, state, rounds: 1, verdict: null, report: null, findings: null, ...over });
+const model = (over = {}) => ({ goal: null, stages: [stage(1, "done"), stage(2, "not_started")], superseded: [], stageCounts: { done: 1, total: 2 },
+  checks: [], checkCounts: { passed: 0, total: 0 }, checksKnown: true, reviews: [], currentReview: null, openQuestion: null, finalVerdict: null,
+  finalReport: null, finalFindings: null, lastReport: null, finish: null, checkpoint: null, endedAt: null, complete: true, ...over });
+const view = (over = {}) => ({ runId: "abcdef1234567890", status: "running", reason: null, workMode: "copy",
+  progress: { conditions: COND, findings: null, checks: [], finish: [], completion: null }, ...over });
+const plan1 = { version: 1, firstStage: 1, text: { stages: [{ title: "Этап-1", task: "Записать разбор" }, { title: "Этап-2", task: "Проверить" }], question: null } };
+const input = (over = {}) => ({ view: view(), model: model(), task: { key: "T-1", title: "Разбор" }, goal: { text: "Разобрать бизнес-логику" },
+  plans: [plan1], report: () => "loading", take: null, asOf: "2026-10-11T09:49:00.000Z", ...over });
+const lines = (doc) => doc.sections.flatMap((s) => [s.heading, ...s.lines.map((l) => l.text ?? l.path)]);
+
+test("planDoc: goal, requirements, every stage with its task and conditions, how each is proved", () => {
+  const doc = planDoc(input(), "ru");
+  assert.equal(doc.title, "T-1 · Разбор — план");
+  const all = lines(doc);
+  assert.ok(all.includes("Разобрать бизнес-логику"));
+  assert.ok(all.includes("R1 Проект проанализирован"));
+  assert.ok(all.some((l) => l.startsWith("R2 Логика понятна — снято: лишнее")));
+  assert.ok(all.some((l) => l.startsWith("Этап 1: Этап-1 — ")));
+  assert.ok(all.includes("Записать разбор") && all.includes("Проверить"));
+  assert.ok(all.includes("C1 разбор записан — изменение в файлах; закрывает R1"));
+  assert.ok(all.includes("C2 тесты проходят — проверка `node --test`; закрывает R2"));
+  const rq = doc.sections.find((s) => s.heading === "Требования");
+  assert.deepEqual(rq.lines.map((l) => l.mark), ["met", "dropped"]);
+});
+
+test("planDoc: a replan names its stages from its first stage on; the dropped condition is in a folded section", () => {
+  const plan2 = { version: 2, firstStage: 2, text: { stages: [{ title: "Новый-2", task: "Проверить иначе" }], question: "Какой формат?" } };
+  assert.equal(stageTask([plan1, plan2], 1), "Записать разбор");
+  assert.equal(stageTask([plan1, plan2], 2), "Проверить иначе");
+  assert.equal(stageTask([plan1, plan2], 3), null);
+  const doc = planDoc(input({ plans: [plan1, plan2] }), "ru");
+  const re = doc.sections.find((s) => s.heading === "Перепланирования");
+  assert.equal(re.collapsed, true);
+  assert.ok(re.lines.some((l) => l.text === "План 2: с этапа 2"));
+  assert.ok(re.lines.some((l) => l.text === "C3 старое условие — снято: заменено" && l.mark === "dropped"));
+  const q = doc.sections.find((s) => s.heading === "Вопрос лида");
+  assert.equal(q.lines[0].text, "Какой формат?");
+  assert.equal(q.lines[0].said, "со слов лида");
+});
+
+test("planDoc: an unread plan says so, a missing one is not invented", () => {
+  const loading = planDoc(input({ plans: [{ version: 1, firstStage: 1, text: "loading" }], goal: "loading" }), "ru");
+  assert.equal(lines(loading).filter((l) => l === "загружается…").length, 3); // goal + two stages
+  assert.equal(stageTask([{ version: 1, firstStage: 1, text: "error" }], 2), "error");
+  const none = planDoc(input({ model: model({ stages: null, stageCounts: null }), plans: [] }), "ru");
+  assert.ok(lines(none).includes("Лид ещё составляет план."));
+});
+
+test("planDoc: a v1 run (no conditions) has stages and no requirements", () => {
+  const doc = planDoc(input({ view: view({ progress: { conditions: null, findings: null, checks: [], finish: [], completion: null } }) }), "ru");
+  assert.ok(!doc.sections.some((s) => s.heading === "Требования"));
+  assert.ok(lines(doc).includes("Записать разбор"));
+});
+
+test("planDoc: without a board task the title is the goal's first line", () => {
+  assert.equal(planDoc(input({ task: null }), "ru").title, "Разобрать бизнес-логику — план");
+  assert.equal(planDoc(input({ task: null, goal: "loading" }), "ru").title, "abcdef12 — план");
 });
