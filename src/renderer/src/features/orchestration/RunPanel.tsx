@@ -1002,17 +1002,19 @@ function RunSummary({ orch, runId, view, records, locale, changedFiles, gaps, in
 function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" | "result"; locale: LocaleId; onNote?: (markdown: string) => void }): React.JSX.Element {
   const [copied, setCopied] = useState(false);
   const md = toMarkdown(doc);
-  const body = (lines: RunDoc["sections"][number]["lines"]) => lines.map((l, i) => l.kind === "item"
+  const body = (lines: RunDoc["sections"][number]["lines"], at: number[]) => lines.map((l, j) => { const i = at[j]; return l.kind === "item"
     ? <li key={i} data-doc-mark={l.mark ?? ""}>{l.mark ? <span className={`orch-doc__mark orch-doc__mark--${l.mark}`} aria-hidden="true" /> : null}{l.text}</li>
     : l.kind === "file"
       ? <section key={i} className="orch-doc__file" data-doc-file={l.path}><h5><code>{l.path}</code></h5>{l.note && <p className="orch-hint" data-doc-file-note>{l.note}</p>}{l.body !== null && <pre>{l.body}</pre>}</section>
-      : <p key={i} className="orch-panel__text">{l.text}{l.said && <i className="orch-doc__said"> ({l.said})</i>}</p>);
+      : <p key={i} className="orch-panel__text">{l.text}{l.said && <i className="orch-doc__said"> ({l.said})</i>}</p>; });
   // items of a section are one list; text and files stand between lists
   const group = (lines: RunDoc["sections"][number]["lines"]) => {
     const out: React.ReactNode[] = [];
     let items: RunDoc["sections"][number]["lines"] = [];
-    const flush = () => { if (items.length) out.push(<ul key={`u${out.length}`}>{body(items)}</ul>); items = []; };
-    lines.forEach((l) => { if (l.kind === "item") items.push(l); else { flush(); out.push(...body([l])); } });
+    let at: number[] = [];
+    const flush = () => { if (items.length) out.push(<ul key={`u${out.length}`}>{body(items, at)}</ul>); items = []; at = []; };
+    // a line's key is its position in the section
+    lines.forEach((l, i) => { if (l.kind === "item") { items.push(l); at.push(i); } else { flush(); out.push(...body([l], [i])); } });
     flush();
     return out;
   };
@@ -1033,24 +1035,32 @@ function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" |
 // biome-ignore-end lint/suspicious/noArrayIndexKey: see the start
 
 // The documents a task created, exactly from the run's tree (their diff only as a fallback): the list again when the run
-// moves (as the «Changes» tab), a file again only when its path or the list's tree changed; one call at a time. Skipped for a newer
-// version's run (main gives no changes for it).
+// moves (as the «Changes» tab); a file again when its tree changed (the tree's name and time, or the run's revision when
+// main gives no time: last check, checkpoint, baseline) or its path; a restored text is read again every time. Entries of
+// other trees are dropped. One call at a time. Skipped for a newer version's run (main gives no changes for it).
 function useCreatedDocs(locale: LocaleId, runId: string, seq: number, skip: boolean): { docs: CreatedDocs; retry(): void } {
   const [docs, setDocs] = useState<CreatedDocs>(skip ? { state: "skipped" } : { state: "loading" });
   const [attempt, setAttempt] = useState(0);
   const cache = useRef(new Map<string, CreatedFile>());
+  const shown = useRef(0);
   // biome-ignore lint/correctness/useExhaustiveDependencies: seq and attempt are the triggers
   useEffect(() => {
     if (skip) { setDocs({ state: "skipped" }); return; }
+    // «loading» again when the tab was skipped, after an error, or on a repeat; a moving run keeps the list it shows
+    const repeated = shown.current !== attempt;
+    shown.current = attempt;
+    setDocs((d) => (d.state === "skipped" || d.state === "error" || repeated ? { state: "loading" } : d));
     let live = true;
     const id = window.setTimeout(() => void (async () => {
       const ch = await outcomeOf(() => api().changes(runId));
       if (!live) return;
       if (ch.outcome.kind !== "accepted" || !ch.value) { setDocs({ state: "error", message: outcomeText(locale, ch.outcome) ?? "" }); return; }
       const picked = pickDocs(ch.value.files);
+      const tree = `${ch.value.at}:${ch.value.atTs ?? `s${seq}`}`;
+      for (const k of [...cache.current.keys()]) if (!k.startsWith(`${tree}:`)) cache.current.delete(k);
       const files: CreatedFile[] = [];
       for (const path of picked.paths) {
-        const key = `${ch.value.atTs ?? ""}:${path}`;
+        const key = `${tree}:${path}`;
         let file = cache.current.get(key);
         if (!file) {
           const ok = async <T,>(call: () => Promise<OrchestrationResult<T>>): Promise<T | null> => {
@@ -1111,7 +1121,7 @@ function RunDocs({ kind, orch, runId, view, records, locale, task, take, seq, in
   }, [kind, view, records, planRecords, textsKey, goalText, goalStored.status, task, take, created.docs, incomplete, locale]);
   return <>
     <RunDocView doc={doc} kind={kind} locale={locale} onNote={onNote && ((md) => onNote(md, { runId, doc: kind }))} />
-    {kind === "result" && created.docs.state === "error" && <button type="button" data-run-doc-retry onClick={created.retry}>{t(locale, "orchRepeat")}</button>}
+    {kind === "result" && (created.docs.state === "error" || (created.docs.state === "ready" && created.docs.files.some((f) => f.why === "unavailable"))) && <button type="button" data-run-doc-retry onClick={created.retry}>{t(locale, "orchRepeat")}</button>}
   </>;
 }
 

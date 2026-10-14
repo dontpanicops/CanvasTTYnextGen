@@ -1227,8 +1227,6 @@ button { border: 0; }
 /* the decision buttons stay in view while a long request scrolls in the summary (1280×800 and smaller) */
 .orch-permission > .orch-panel__actions { position: sticky; bottom: 0; z-index: 1; margin: 0 -10px; padding: 8px 10px; background: color-mix(in srgb, var(--yellow) 22%, var(--surface-soft)); }
 .orch-summary--compact:not(:has(.orch-permission)) { max-height: 30vh; }
-.orch-summary__plan { max-height: 160px; overflow: auto; margin: 0; padding: 6px 6px 6px 26px; display: flex; flex-direction: column; gap: 4px; border-radius: 8px; background: var(--surface); }
-.orch-summary__plan li span { display: block; opacity: .72; }
 .orch-board__full dd { color: var(--danger); font-weight: 800; }
 .orch-board__terminal dd { color: var(--yellow); font-weight: 800; }
 .orch-access-badge { padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; background: color-mix(in srgb, var(--success) 18%, transparent); }
