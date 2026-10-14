@@ -1169,6 +1169,7 @@ export const IPC = {
   orchestrationActivity: "orchestration:activity",
   orchestrationChanges: "orchestration:changes",
   orchestrationDiff: "orchestration:diff",
+  orchestrationFile: "orchestration:file",
   orchestrationTake: "orchestration:take",
   orchestrationTakeResult: "orchestration:take-result",
   orchestrationBoard: "orchestration:board",

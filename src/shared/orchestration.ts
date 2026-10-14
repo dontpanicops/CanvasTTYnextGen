@@ -462,6 +462,8 @@ export interface OrchestrationChanges {
   transferred: false; // the application never moves changes into the source project
 }
 export interface OrchestrationDiff { path: string; text: string; truncated: boolean }
+// One file's exact text from the tree the change list reads; text is null when it is too large or not text.
+export interface OrchestrationFile { path: string; text: string | null; why: "too_large" | "binary" | null }
 
 // «Забрать результат» (UX audit 2026-10-05, top-10 #10): the run's changes into the project, by the application.
 // Only for a separate copy or worktree, a run that is completed, stopped or paused, with changes. Kept in a file of the
@@ -607,6 +609,7 @@ export interface OrchestrationApi {
   onActivity(runId: string, listener: (event: OrchestrationActivityEvent) => void): () => void;
   changes(runId: string): Promise<OrchestrationResult<OrchestrationChanges>>;
   diff(runId: string, path: string): Promise<OrchestrationResult<OrchestrationDiff>>;
+  file(runId: string, path: string): Promise<OrchestrationResult<OrchestrationFile>>;
   take(runId: string): Promise<OrchestrationResult<OrchestrationTake>>;
   takeResult(runId: string, input: OrchestrationTakeInput): Promise<OrchestrationResult<OrchestrationTakeOutcome>>;
   // B1: the task board (stage-b-board.md). board(): the board as stored and the facts of its tasks' runs; the statuses

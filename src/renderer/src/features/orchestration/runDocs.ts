@@ -2,7 +2,7 @@
 // reads in a minute, derived from the journal and the run's view — never stored, nothing in them is the agents' proof.
 // One RunDoc feeds both the panel's view and the markdown (copy, a note on the canvas), so the two never differ.
 import type { LocaleId } from "../../../../shared/contracts.ts";
-import type { OrchestrationChanges, OrchestrationConditions, OrchestrationDiff, OrchestrationRunView, OrchestrationTake } from "../../../../shared/orchestration.ts";
+import type { OrchestrationChanges, OrchestrationConditions, OrchestrationDiff, OrchestrationFile, OrchestrationRunView, OrchestrationTake } from "../../../../shared/orchestration.ts";
 import { t, type TranslationKey } from "../../lib/i18n.ts";
 import { outcomeKey, reportParts, saidKey, type RunSummaryModel } from "./runStatus.ts";
 import { takenLines } from "./runModel.ts";
@@ -155,18 +155,29 @@ export function planDoc(input: DocInput, locale: LocaleId): RunDoc {
   return { title: say("docPlanTitle", { name: docName(input) }), asOf: say("docAsOf", { time: hhmm(locale, input.asOf) }), sections };
 }
 
-export type CreatedFile = { path: string; body: string | null; why: "loading" | "too_large" | "binary" | "unavailable" | null };
+export type CreatedFile = { path: string; body: string | null; why: "loading" | "too_large" | "binary" | "unavailable" | null; restored?: true };
 // skipped: not read at all (a newer version's run: main gives no changes for it)
 export type CreatedDocs = { state: "skipped" } | { state: "loading" } | { state: "error"; message: string }
   | { state: "ready"; at: string; files: CreatedFile[]; more: number };
 
 const WHY = { loading: "docLoading", too_large: "docFileTooLarge", binary: "docFileBinary", unavailable: "docFileUnavailable" } as const;
 
+// A created document's text (plan-result-docs.md §3.3): exactly from the run's Git tree first; read back from its diff
+// only when that read failed, and then marked. Too large or not text is the file's own answer: no diff is asked for.
+export async function readCreatedFile(path: string, exact: () => Promise<OrchestrationFile | null>, diff: () => Promise<OrchestrationDiff | null>): Promise<CreatedFile> {
+  const f = await exact();
+  if (f) return { path, body: f.text, why: f.why };
+  const d = await diff();
+  // an empty diff names no new file and no hunk: the path is not changed, which is not an empty document
+  if (!d || (!d.truncated && !/^new file mode |^@@/m.test(d.text))) return { path, body: null, why: "unavailable" };
+  return { path, ...addedText(d), restored: true };
+}
+
 function createdLines(locale: LocaleId, docs: CreatedDocs): DocLine[] | null {
   if (docs.state === "skipped") return null;
   if (docs.state === "loading") return [{ kind: "text", text: w(locale, "docLoading") }];
   if (docs.state === "error") return [{ kind: "text", text: w(locale, "docDocsError", { message: docs.message }) }];
-  const lines: DocLine[] = docs.files.map((f) => ({ kind: "file", path: f.path, body: f.body, note: f.why ? w(locale, WHY[f.why]) : null }));
+  const lines: DocLine[] = docs.files.map((f) => ({ kind: "file", path: f.path, body: f.body, note: f.why ? w(locale, WHY[f.why]) : f.restored ? w(locale, "docFileRestored") : null }));
   if (!docs.files.length) lines.push({ kind: "text", text: w(locale, "docDocsNone") });
   if (docs.more > 0) lines.push({ kind: "text", text: w(locale, "docDocsMore", { n: docs.more }) });
   if (docs.files.length) lines.push({ kind: "text", text: w(locale, `orchChangesAt_${docs.at}`) }); // which tree, as the «Changes» tab says
@@ -177,7 +188,8 @@ function takeLines(locale: LocaleId, view: OrchestrationRunView, take: Orchestra
   if (view.workMode === "project") return [{ kind: "text", text: w(locale, "docTakeInPlace") }];
   const taken = takenLines(locale, take);
   if (taken.length) return taken.map((text) => ({ kind: "text", text }));
-  return [{ kind: "text", text: view.workMode === "worktree" ? w(locale, "docTakeWorktree", { branch: view.progress?.branch ?? "?" }) : w(locale, "docTakeCopy") }];
+  const branch = view.progress?.branch;
+  return [{ kind: "text", text: view.workMode === "worktree" && branch ? w(locale, "docTakeWorktree", { branch }) : w(locale, "docTakeCopy") }];
 }
 
 export function resultDoc(input: DocInput, docs: CreatedDocs, locale: LocaleId): RunDoc {
@@ -195,7 +207,8 @@ export function resultDoc(input: DocInput, docs: CreatedDocs, locale: LocaleId):
     const text = s.report ? input.report(s.report.sha256) : null;
     const parts = text && text !== "loading" && text !== "error" ? reportParts(text) : null;
     const summary = parts ? parts.summary ?? parts.text ?? say("docNotSaid") : loaded(locale, text);
-    return { kind: "text", text: `${s.title ?? `${say("orchStage")} ${s.n}`}: ${summary}`, said: say("docByExecutor") };
+    const line: DocLine = { kind: "text", text: `${s.title ?? `${say("orchStage")} ${s.n}`}: ${summary}` };
+    return parts ? { ...line, said: say("docByExecutor") } : line; // loading, unreadable or not given: no word to attribute
   }) : [{ kind: "text", text: say("docNothingYet") }] });
 
   const c = view.progress?.conditions ?? null;

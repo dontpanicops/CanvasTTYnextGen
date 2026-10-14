@@ -364,6 +364,11 @@ export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager
     if (p.startsWith("/") || p.split("/").includes("..")) bad("path must be relative to the copy");
     return [uuid(runId, "runId"), p] as [string, string];
   }, manager.diff));
+  handleMain(IPC.orchestrationFile, (_e, runId: unknown, path: unknown) => checked(() => {
+    const p = str(path, "path", 4096);
+    if (p.startsWith("/") || p.split("/").includes("..")) bad("path must be relative to the copy");
+    return [uuid(runId, "runId"), p] as [string, string];
+  }, manager.file));
   handleMain(IPC.orchestrationTake, (_e, runId: unknown) => checked(() => [uuid(runId, "runId")] as [string], manager.take));
   handleMain(IPC.orchestrationTakeResult, (_e, runId: unknown, input: unknown) => checked(() => {
     const o = obj(input, "request", ["action"], ["name"]);

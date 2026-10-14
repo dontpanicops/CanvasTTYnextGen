@@ -2,7 +2,7 @@
 // journal, never invented; the text of a created document read back from its diff; the same document as markdown.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addedText, pickDocs, toMarkdown, noteText, NOTE_MAX, planDoc, resultDoc, stageTask } from "../src/renderer/src/features/orchestration/runDocs.ts";
+import { addedText, readCreatedFile, pickDocs, toMarkdown, noteText, NOTE_MAX, planDoc, resultDoc, stageTask } from "../src/renderer/src/features/orchestration/runDocs.ts";
 
 const diffOf = (lines) => ({ path: "docs/a.md", truncated: false, text: [
   "diff --git a/docs/a.md b/docs/a.md", "new file mode 100644", "index 0000000..1111111", "--- /dev/null", "+++ b/docs/a.md",
@@ -167,6 +167,7 @@ test("resultDoc: what was done is the executor's word, marked; requirements carr
   assert.equal(d.lines[0].text, "Этап-1: разбор записан в docs/a.md");
   assert.equal(d.lines[0].said, "со слов исполнителя");
   assert.equal(d.lines[1].text, "Этап-2: не указано");
+  assert.equal(d.lines[1].said, undefined, "an unread or empty report is not the executor's word");
   assert.deepEqual(doc.sections.find((s) => s.heading === "Требования").lines.map((l) => l.mark), ["met", "dropped"]);
 });
 
@@ -195,4 +196,42 @@ test("resultDoc: nothing done yet says so", () => {
   const doc = resultDoc(input({ model: model({ stages: null }) }), { state: "loading" }, "ru");
   assert.equal(doc.sections.find((s) => s.heading === "Что сделано").lines[0].text, "Пока нечего показать.");
   assert.equal(doc.sections.find((s) => s.heading === "Созданные документы").lines[0].text, "загружается…");
+});
+
+const never = () => { throw new Error("diff must not be read"); };
+test("readCreatedFile: the exact text first, the diff never asked for", async () => {
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => ({ path: "docs/a.md", text: "# A\n", why: null }), never), { path: "docs/a.md", body: "# A\n", why: null });
+});
+test("readCreatedFile: too large or not text from the exact read is final", async () => {
+  assert.deepEqual(await readCreatedFile("b.md", async () => ({ path: "b.md", text: null, why: "too_large" }), never), { path: "b.md", body: null, why: "too_large" });
+  assert.deepEqual(await readCreatedFile("c.md", async () => ({ path: "c.md", text: null, why: "binary" }), never), { path: "c.md", body: null, why: "binary" });
+});
+test("readCreatedFile: the exact read failed — restored from the diff, marked", async () => {
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => null, async () => diffOf(["# A"])), { path: "docs/a.md", body: "# A\n", why: null, restored: true });
+});
+test("readCreatedFile: both failed — unavailable", async () => {
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => null, async () => null), { path: "docs/a.md", body: null, why: "unavailable" });
+});
+test("readCreatedFile: a diff without a new file or a hunk is not an empty document; a new empty file is", async () => {
+  const none = async () => ({ path: "docs/a.md", truncated: false, text: "" });
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => null, none), { path: "docs/a.md", body: null, why: "unavailable" });
+  const empty = async () => ({ path: "docs/a.md", truncated: false, text: "diff --git a/docs/a.md b/docs/a.md\nnew file mode 100644\nindex 0000000..e69de29\n" });
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => null, empty), { path: "docs/a.md", body: "", why: null, restored: true });
+  assert.deepEqual(await readCreatedFile("docs/a.md", async () => null, async () => ({ path: "docs/a.md", truncated: true, text: "" })), { path: "docs/a.md", body: null, why: "too_large", restored: true });
+});
+test("resultDoc: a restored document says so, in the view and in markdown", () => {
+  const doc = resultDoc(done(), ready([{ path: "docs/a.md", body: "# A\n", why: null, restored: true }]), "ru");
+  const f = doc.sections.find((s) => s.heading === "Созданные документы").lines[0];
+  assert.equal(f.note, "Восстановлено из изменений: точный текст файла прочитать не удалось.");
+  assert.match(toMarkdown(doc), /_Восстановлено из изменений: точный текст файла прочитать не удалось\._\n\n# A/);
+});
+test("resultDoc: the executor's word is marked only when the report was read", () => {
+  const said = (text) => resultDoc(done({ report: () => text }), ready([]), "ru").sections.find((s) => s.heading === "Что сделано").lines[0].said;
+  assert.equal(said("loading"), undefined);
+  assert.equal(said("error"), undefined);
+});
+test("resultDoc: a worktree run without a branch in the view says copy, not a question mark", () => {
+  const doc = resultDoc(done({ view: view({ status: "completed", workMode: "worktree", progress: { ...view().progress, branch: undefined } }) }), ready([]), "ru");
+  const t = doc.sections.find((s) => s.heading === "Как забрать").lines[0].text;
+  assert.ok(!t.includes("?") && /^Результат в отдельной копии/.test(t), t);
 });

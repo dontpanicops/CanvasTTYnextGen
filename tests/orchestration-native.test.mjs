@@ -10,12 +10,13 @@ import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { findGit } from "../src/main/services/orchestration/git.ts";
 import { captureLoginEnv } from "../src/main/services/orchestration/loginEnv.ts";
+import { createRun } from "../src/main/services/orchestration/store.ts";
 import { createRunManager, testNativeRuntime } from "../src/main/services/orchestration/manager.ts";
 import { buildNativeTurn } from "../src/main/services/orchestration/providers.ts";
 import { assessReadiness, suggestCommands } from "../src/main/services/orchestration/readiness.ts";
 import { claudeHostDriver, codexAppServerDriver } from "../src/main/services/orchestration/sessions.ts";
 import { checkTurnSpec, sessionEnv } from "../src/main/services/orchestration/turn.ts";
-import { createWorkspace, applyTreeToCopy, snapshotCopyTree } from "../src/main/services/orchestration/workspace.ts";
+import { createWorkspace, applyTreeToCopy, readTreeFile, snapshotCopyTree } from "../src/main/services/orchestration/workspace.ts";
 import { parseCommand, parseCreate } from "../src/main/ipc/orchestrationIpc.ts";
 import { runHeadline } from "../src/renderer/src/features/orchestration/runModel.ts";
 
@@ -233,6 +234,11 @@ test("a native run works in the project folder, keeps uncommitted work, asks the
   assert.ok(records.some((r) => r.type === "check.finished" && r.data.status === "passed"), JSON.stringify(records.map((r) => r.type)));
   const changes = await m.changes(runId);
   assert.ok(changes.value.files.some((f) => f.path === "note.txt"), JSON.stringify(changes));
+  const exact = await m.file(runId, "note.txt");
+  assert.deepEqual(exact.value, { path: "note.txt", text: "hello\n", why: null }, JSON.stringify(exact));
+  const outside = await m.file(runId, "user.txt");
+  assert.equal(outside.ok, false, "only a path the run's changes name");
+  assert.equal(outside.code, "invalid_argument", JSON.stringify(outside));
   const activity = await m.activity(runId, 0, 500);
   assert.ok(activity.value.entries.some((e) => e.kind === "permission_requested"));
   assert.ok(activity.value.entries.some((e) => e.kind === "permission_decided"));
@@ -350,4 +356,29 @@ test("IPC: goal commands and work mode, the permission command and its answers a
   const p = parseCommand({ ...base, command: { kind: "permission", requestId: randomUUID(), decision: "allow_session", answers: { q1: ["a"], q2: [] } } });
   assert.equal(p.command.decision, "allow_session");
   assert.throws(() => parseCommand({ ...base, command: { kind: "permission", requestId: randomUUID(), decision: "bypass" } }), /decision/);
+});
+
+test("readTreeFile: the exact bytes of a blob, a big one is not read, a path outside is refused", OPTS, async () => {
+  const src = path.join(TMP, "tree-src");
+  fs.mkdirSync(src, { recursive: true });
+  g(src, "init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(src, "a.txt"), "one\n");
+  fs.writeFileSync(path.join(src, "big.txt"), "x".repeat(40));
+  fs.writeFileSync(path.join(src, "bin.dat"), Buffer.from([1, 0, 2]));
+  g(src, "add", ".");
+  g(src, "commit", "-q", "-m", "init");
+  const root = path.join(TMP, "tree-root");
+  const runId = randomUUID();
+  const writer = await createRun(root, runId, { goal: "tree" });
+  after(() => writer.close());
+  const ws = await createWorkspace({ root, runId, source: src, gitPath: GIT });
+  const tree = ws.baseline.tree;
+  const a = await readTreeFile(ws, tree, "a.txt", 16);
+  assert.equal(a.truncated, false);
+  assert.equal(a.bytes.toString("utf8"), "one\n");
+  assert.deepEqual(await readTreeFile(ws, tree, "big.txt", 16), { bytes: null, truncated: true });
+  assert.deepEqual([...(await readTreeFile(ws, tree, "bin.dat", 16)).bytes], [1, 0, 2]);
+  for (const bad of ["../a.txt", "/etc/passwd", "a/../b"]) {
+    await assert.rejects(() => readTreeFile(ws, tree, bad), (e) => e.code === "invalid_input", bad);
+  }
 });
