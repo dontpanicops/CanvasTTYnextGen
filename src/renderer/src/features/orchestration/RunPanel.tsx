@@ -19,6 +19,7 @@ import type {
   OrchestrationPersonDecide,
   OrchestrationPlanChoice,
   OrchestrationPlanDecide,
+  OrchestrationResult,
   OrchestrationRunView,
   OrchestrationTake,
   OrchestrationTakeOutcome
@@ -84,6 +85,7 @@ import {
   type RunDigest
 } from "./runModel";
 import { duration, findingsLine, finishText, isServiceEntry, outcomeKey, personDecisionsLine, readJournal, reportParts, saidKey, summaryModel, type ReportParts, type RunJournalState, type TextRef } from "./runStatus";
+import { pickDocs, planDoc, readCreatedFile, resultDoc, toMarkdown, type CreatedDocs, type CreatedFile, type DocInput, type Loaded, type PlanEntry, type PlanJson, type RunDoc } from "./runDocs";
 import type { PanelRole, PanelState, PanelTab } from "./useAgentCanvasUi";
 import { outcomeText, type Orchestration, type RunActivityState } from "./useOrchestration";
 
@@ -996,6 +998,123 @@ function RunSummary({ orch, runId, view, records, locale, changedFiles, gaps, in
   );
 }
 
+// biome-ignore-start lint/suspicious/noArrayIndexKey: a document's lines are built once, in order, never reordered
+function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" | "result"; locale: LocaleId; onNote?: (markdown: string) => void }): React.JSX.Element {
+  const [copied, setCopied] = useState(false);
+  const md = toMarkdown(doc);
+  const body = (lines: RunDoc["sections"][number]["lines"]) => lines.map((l, i) => l.kind === "item"
+    ? <li key={i} data-doc-mark={l.mark ?? ""}>{l.mark ? <span className={`orch-doc__mark orch-doc__mark--${l.mark}`} aria-hidden="true" /> : null}{l.text}</li>
+    : l.kind === "file"
+      ? <section key={i} className="orch-doc__file" data-doc-file={l.path}><h5><code>{l.path}</code></h5>{l.note && <p className="orch-hint" data-doc-file-note>{l.note}</p>}{l.body !== null && <pre>{l.body}</pre>}</section>
+      : <p key={i} className="orch-panel__text">{l.text}{l.said && <i className="orch-doc__said"> ({l.said})</i>}</p>);
+  // items of a section are one list; text and files stand between lists
+  const group = (lines: RunDoc["sections"][number]["lines"]) => {
+    const out: React.ReactNode[] = [];
+    let items: RunDoc["sections"][number]["lines"] = [];
+    const flush = () => { if (items.length) out.push(<ul key={`u${out.length}`}>{body(items)}</ul>); items = []; };
+    lines.forEach((l) => { if (l.kind === "item") items.push(l); else { flush(); out.push(...body([l])); } });
+    flush();
+    return out;
+  };
+  return (
+    <article className="orch-doc" data-run-doc={kind}>
+      <div className="orch-doc__actions">
+        <button type="button" data-run-doc-copy onClick={() => { void window.canvasTTY.clipboard.writeText(md); setCopied(true); }}>{t(locale, copied ? "docCopied" : "docCopy")}</button>
+        {onNote && <button type="button" data-run-doc-note onClick={() => onNote(md)}>{t(locale, "docToCanvas")}</button>}
+      </div>
+      <h3>{doc.title}</h3>
+      <p className="orch-hint">{doc.asOf}</p>
+      {doc.sections.map((s, i) => s.collapsed
+        ? <details key={i} className="orch-doc__section"><summary>{s.heading}</summary>{group(s.lines)}</details>
+        : <section key={i} className="orch-doc__section"><h4>{s.heading}</h4>{group(s.lines)}</section>)}
+    </article>
+  );
+}
+// biome-ignore-end lint/suspicious/noArrayIndexKey: see the start
+
+// The documents a task created, exactly from the run's tree (their diff only as a fallback): the list again when the run
+// moves (as the «Changes» tab), a file again only when its path or the list's tree changed; one call at a time. Skipped for a newer
+// version's run (main gives no changes for it).
+function useCreatedDocs(locale: LocaleId, runId: string, seq: number, skip: boolean): { docs: CreatedDocs; retry(): void } {
+  const [docs, setDocs] = useState<CreatedDocs>(skip ? { state: "skipped" } : { state: "loading" });
+  const [attempt, setAttempt] = useState(0);
+  const cache = useRef(new Map<string, CreatedFile>());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: seq and attempt are the triggers
+  useEffect(() => {
+    if (skip) { setDocs({ state: "skipped" }); return; }
+    let live = true;
+    const id = window.setTimeout(() => void (async () => {
+      const ch = await outcomeOf(() => api().changes(runId));
+      if (!live) return;
+      if (ch.outcome.kind !== "accepted" || !ch.value) { setDocs({ state: "error", message: outcomeText(locale, ch.outcome) ?? "" }); return; }
+      const picked = pickDocs(ch.value.files);
+      const files: CreatedFile[] = [];
+      for (const path of picked.paths) {
+        const key = `${ch.value.atTs ?? ""}:${path}`;
+        let file = cache.current.get(key);
+        if (!file) {
+          const ok = async <T,>(call: () => Promise<OrchestrationResult<T>>): Promise<T | null> => {
+            const r = await outcomeOf(call);
+            return r.outcome.kind === "accepted" && r.value ? r.value : null;
+          };
+          file = await readCreatedFile(path, () => ok(() => api().file(runId, path)), () => ok(() => api().diff(runId, path)));
+          if (!live) return;
+          // a restored text is not kept: the next pass tries the exact read again
+          if (file.why !== "unavailable" && !file.restored) cache.current.set(key, file);
+        }
+        files.push(file);
+      }
+      setDocs({ state: "ready", at: ch.value.at, files, more: picked.more });
+    })(), 300);
+    return () => { live = false; window.clearTimeout(id); };
+  }, [locale, runId, seq, skip, attempt]);
+  return { docs, retry: () => setAttempt((n) => n + 1) };
+}
+
+function RunDocs({ kind, orch, runId, view, records, locale, task, take, seq, incomplete, onNote }: {
+  kind: "plan" | "result"; orch: Orchestration; runId: string; view: OrchestrationRunView; records: readonly OrchestrationHistoryRecord[];
+  locale: LocaleId; task: { key: string; title: string } | null; take: OrchestrationTake | null; seq: number; incomplete: boolean; onNote?: (markdown: string, source: { runId: string; doc: "plan" | "result" }) => void;
+}): React.JSX.Element {
+  const planRecords = useMemo(() => records.filter((r) => r.type === "plan.recorded"), [records]);
+  // an executor's or reviewer's report is the ref of a finished turn (as summaryModel reads it)
+  const shas = useMemo(() => [
+    ...planRecords.map((r) => (r.data.plan as TextRef | undefined)?.sha256),
+    ...records.filter((r) => r.type === "turn.finished").map((r) => (r.data.report as { ref?: TextRef } | undefined)?.ref?.sha256)
+  ].filter((x): x is string => typeof x === "string"), [planRecords, records]);
+  useEffect(() => { for (const sha of shas) orch.loadText(runId, sha); }, [orch.loadText, shas, runId]);
+  const textOf = (sha: string): Loaded<string> => { const s = orch.texts[sha]; return s?.status === "ready" ? s.text : s?.status === "error" ? "error" : "loading"; };
+  const goalStored = useStored(orch, runId, (records.find((r) => r.type === "run.created")?.data.goal as TextRef | undefined)?.sha256);
+  const goalText = goalStored.text;
+  const textsKey = shas.map((sha) => `${sha}:${orch.texts[sha]?.status ?? ""}`).join(",");
+  const created = useCreatedDocs(locale, runId, seq, kind !== "result" || !!view.newer);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: textsKey stands for orch.texts
+  const doc = useMemo(() => {
+    const model = summaryModel(view, records, {
+      planTitles: (sha) => { const s = orch.texts[sha]; return s?.status === "ready" ? parsePlan(s.text).map((p) => p.title) : null; },
+      complete: !incomplete
+    });
+    const plans: PlanEntry[] = planRecords.map((r, i) => {
+      const sha = (r.data.plan as TextRef | undefined)?.sha256;
+      const raw = sha ? textOf(sha) : "error";
+      let text: Loaded<PlanJson> = raw === "loading" || raw === "error" ? raw : "error";
+      if (raw !== "loading" && raw !== "error") {
+        try { const p = JSON.parse(raw) as { question?: unknown }; text = { stages: parsePlan(raw), question: typeof p.question === "string" ? p.question : null }; } catch { text = "error"; }
+      }
+      return { version: i + 1, firstStage: typeof r.data.firstStage === "number" ? r.data.firstStage : 1, text };
+    });
+    const g = goalText === null ? (goalStored.status === "error" || goalStored.status === "none" ? null : "loading") : parseGoal(goalText);
+    const input: DocInput = {
+      view, model, task, plans, take, asOf: new Date().toISOString(), report: textOf,
+      goal: g === "loading" ? "loading" : g ? { text: typeof g.text === "string" ? g.text : null } : { text: goalText }
+    };
+    return kind === "plan" ? planDoc(input, locale) : resultDoc(input, created.docs, locale);
+  }, [kind, view, records, planRecords, textsKey, goalText, goalStored.status, task, take, created.docs, incomplete, locale]);
+  return <>
+    <RunDocView doc={doc} kind={kind} locale={locale} onNote={onNote && ((md) => onNote(md, { runId, doc: kind }))} />
+    {kind === "result" && created.docs.state === "error" && <button type="button" data-run-doc-retry onClick={created.retry}>{t(locale, "orchRepeat")}</button>}
+  </>;
+}
+
 // ---------- the panel ----------
 
 // runId: the run shown (a link's latest, or one opened from a workspace's history). onNewGoal: only for a link's
@@ -1004,6 +1123,7 @@ type RunPanelProps = {
   orch: Orchestration; runId: string | null; locale: LocaleId; panel: PanelState;
   onClose(): void; onNewGoal: (() => void) | null; onView(next: { tab?: PanelTab; role?: PanelRole }): void;
   task?: { key: string; title: string } | null; // B2: the board task of the run — the summary starts with it
+  onNoteFromText?: (markdown: string, source: { runId: string; doc: "plan" | "result" }) => void; // «To the canvas» of the Plan and Result tabs
 };
 
 // «Забрать результат»: a new branch in the project (the safe one), or the patch applied to the working folder when it fits
@@ -1228,7 +1348,7 @@ function RaiseLimit({ locale, cost, budget, primary, sending, onRaise, children 
   );
 }
 
-function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onView, task }: RunPanelProps): React.JSX.Element {
+function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onView, task, onNoteFromText }: RunPanelProps): React.JSX.Element {
   const state = runId ? orch.runs[runId] ?? null : null;
   const view: OrchestrationRunView | null = state?.view ?? null;
   const activity = (runId && orch.activity[runId]) || { entries: [], gaps: [], firstId: 0, status: "loading" as const, resyncs: 0 };
@@ -1261,7 +1381,7 @@ function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onVie
     lastStatus.current = status;
     if (was && status && !TERMINAL_STATUSES.includes(was) && TERMINAL_STATUSES.includes(status)) setEndedHere(true);
   }, [status]);
-  useEffect(() => { if (panel.tab === "summary") setEndedHere(false); }, [panel.tab]);
+  useEffect(() => { if (panel.tab === "summary" || panel.tab === "result") setEndedHere(false); }, [panel.tab]);
 
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -1390,7 +1510,7 @@ function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onVie
   };
 
   // a newer version's run: its changes are not read here (main refuses them), so there is no tab for them
-  const tabs: PanelTab[] = view?.newer ? ["summary", "overview", "activity", "log", "history"] : ["summary", "overview", "activity", "changes", "log", "history"];
+  const tabs: PanelTab[] = view?.newer ? ["plan", "result", "summary", "overview", "activity", "log", "history"] : ["plan", "result", "summary", "overview", "activity", "changes", "log", "history"];
   const roleFilter = useCallback((e: OrchestrationActivityEntry) => panel.role === "check"
     ? (e.role === "check" || e.role === "run") && FEED_KINDS.has(e.kind)
     : (e.role === panel.role && FEED_KINDS.has(e.kind)) || (e.role === "run" && e.kind === "status"), [panel.role]);
@@ -1398,8 +1518,9 @@ function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onVie
     && (LOG_KINDS.has(e.kind) || (e.kind === "tool_finished" && typeof e.detail?.output === "string")), [panel.role]);
   const selected = panel.role === "lead" ? lead : panel.role === "executor" ? executor : panel.role === "reviewer" ? reviewer : null;
 
+  const wide = panel.tab === "summary" || panel.tab === "plan" || panel.tab === "result";
   return (
-    <aside className={`orch-panel${panel.tab === "summary" ? " orch-panel--wide" : ""}${expanded ? " orch-panel--full" : ""}`}
+    <aside className={`orch-panel${wide ? " orch-panel--wide" : ""}${expanded ? " orch-panel--full" : ""}`}
       data-interactive="true" data-wheel-owner="local" data-canvas-wheel-priority="local" aria-label={t(locale, "orchRun")} data-orch-panel-tab={panel.tab}>
       <header className="orch-panel__header">
         <strong>{t(locale, "orchRun")}</strong>
@@ -1424,10 +1545,10 @@ function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onVie
               <strong data-orch-what><Termed locale={locale} text={pause ? pause.what : headlineText(locale, view, activity.entries)} /></strong>
               {view.reason && <span data-orch-reason><Termed locale={locale} text={pause ? pause.why : reasonText(locale, view, activity.entries)} /></span>}
             </div>
-            {endedHere && panel.tab !== "summary" && (
+            {endedHere && panel.tab !== "summary" && panel.tab !== "result" && (
               <div className="orch-ended" role="status" data-orch-ended>
                 <span>{t(locale, "orchSummaryReady")}</span>
-                <button type="button" className="orch-primary" onClick={() => onView({ tab: "summary" })}>{t(locale, "orchSummaryOpen")}</button>
+                <button type="button" className="orch-primary" onClick={() => onView({ tab: "result" })}>{t(locale, "orchSummaryOpen")}</button>
               </div>
             )}
             {view.newer && (
@@ -1439,8 +1560,8 @@ function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onVie
               </div>
             )}
             {!view.newer && <p className="orch-summary__next" data-orch-next><b>{t(locale, "orchNextStep")}:</b> <Termed locale={locale} text={pause ? pause.todo : nextStepText(locale, view, activity.entries)} /></p>}
-            {head.headline === "awaiting_plan_review" && plan.length > 0 && (
-              <ol className="orch-summary__plan" data-orch-summary-plan start={planFirst}>{plan.map((p, i) => <li key={i}><strong>{p.title}</strong><span>{p.task}</span></li>)}</ol>
+            {head.headline === "awaiting_plan_review" && panel.tab !== "plan" && (
+              <button type="button" className="orch-primary" data-orch-open-plan onClick={() => onView({ tab: "plan" })}>{t(locale, "docOpenPlan")}</button>
             )}
             {view.permission && !view.newer && (
               <PermissionBlock key={view.permission.requestId} locale={locale} request={view.permission} more={(view.pendingPermissions ?? 1) - 1} sending={sending || off("permission")}
@@ -1592,6 +1713,10 @@ function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onVie
           )}
 
           <div className="orch-panel__body" data-orch-body={panel.tab}>
+            {(panel.tab === "plan" || panel.tab === "result") && runId && (records.length
+              ? <RunDocs kind={panel.tab} orch={orch} runId={runId} view={view} records={records} locale={locale} task={task ?? null} take={take}
+                seq={state?.seq ?? 0} incomplete={journal?.status !== "ready"} onNote={onNoteFromText} />
+              : <p className="orch-hint">{t(locale, "orchLoading")}</p>)}
             {panel.tab === "summary" && runId && <>
               {/* A failed read keeps what was read, says it is incomplete and offers to read the rest (from where it stopped). */}
               {journal?.status === "error" && (

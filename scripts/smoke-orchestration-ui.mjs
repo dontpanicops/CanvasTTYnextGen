@@ -204,6 +204,16 @@ try {
   const scrolled = await app.ev(`${q(".orch-panel__body")}.scrollTop`);
   expect(scrolled > 0, "the run panel scrolls with the mouse wheel (the canvas does not take the wheel over it)", scrolled);
   expect(true, "the executor's report opens with its summary", null);
+  await openTab(app, "result");
+  await app.waitFor(`${q('[data-run-doc="result"]')}?.textContent.includes("extra test fixed")`, "result tab shows what was done");
+  expect(true, "completed: the result tab shows what the executor did", null);
+  await app.clickEl(q("[data-run-doc-copy]"));
+  const copied = await app.ev("window.canvasTTY.clipboard.readText()");
+  expect(typeof copied === "string" && copied.startsWith("# "), "the result is copied as markdown", copied?.slice(0, 80));
+  await openTab(app, "plan");
+  await app.waitFor(`${q('[data-run-doc="plan"]')}?.textContent.includes("Заметка")`, "plan tab shows the stage");
+  expect(true, "completed: the plan tab shows the stage", null);
+  await openTab(app, "history");
   await app.reveal(`${failedCheck}`);
   await app.shot("06b-history-details");
 
@@ -215,8 +225,12 @@ try {
   expect(reason2.includes("план") && JSON.stringify(actions2) === JSON.stringify(["Начать работу по плану", "Один шаг", "Стоп"]), "plan review: paused with its reason; Resume (as «Начать работу по плану»), Step, Stop offered", [reason2, actions2]);
   await app.waitFor(`document.querySelectorAll(".orch-plan li").length === 1`, "plan shown for review");
   // review UX-9: the plan to review is also in the pinned summary, in view without scrolling
-  const summaryPlan = await visibleNow(app, q("[data-orch-summary-plan] li"));
-  expect(summaryPlan.ok, "plan review: the plan is in the summary, in view", summaryPlan);
+  const openPlan = await visibleNow(app, q("[data-orch-open-plan]"));
+  expect(openPlan.ok, "plan review: «Open the plan» is in the summary, in view", openPlan);
+  await app.clickEl(q("[data-orch-open-plan]"));
+  await app.waitFor(`${q('[data-run-doc="plan"]')}?.textContent.includes("Add src/note.mjs exporting a constant")`, "plan tab shows the stage's task");
+  expect(true, "plan review: the plan tab shows the stage's task in full", null);
+  await openTab(app, "overview"); // the wide plan tab covers the cards
   await app.shot("07-plan-review");
   await app.clickEl(byText(".orch-panel__actions button", "Стоп"));
   await app.waitFor(`${q(".orch-panel__status--stopped")} && true`, "run 2 stopped", 30_000);
