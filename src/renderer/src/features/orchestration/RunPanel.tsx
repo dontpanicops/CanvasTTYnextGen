@@ -1001,6 +1001,12 @@ function RunSummary({ orch, runId, view, records, locale, changedFiles, gaps, in
 // biome-ignore-start lint/suspicious/noArrayIndexKey: a document's lines are built once, in order, never reordered
 function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" | "result"; locale: LocaleId; onNote?: (markdown: string) => void }): React.JSX.Element {
   const [copied, setCopied] = useState(false);
+  const [noted, setNoted] = useState(false);
+  useEffect(() => {
+    if (!noted) return;
+    const timer = window.setTimeout(() => setNoted(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [noted]);
   const md = toMarkdown(doc);
   const body = (lines: RunDoc["sections"][number]["lines"], at: number[]) => lines.map((l, j) => { const i = at[j]; return l.kind === "item"
     ? <li key={i} data-doc-mark={l.mark ?? ""}>{l.mark ? <span className={`orch-doc__mark orch-doc__mark--${l.mark}`} aria-hidden="true" /> : null}{l.text}</li>
@@ -1022,7 +1028,7 @@ function RunDocView({ doc, kind, locale, onNote }: { doc: RunDoc; kind: "plan" |
     <article className="orch-doc" data-run-doc={kind}>
       <div className="orch-doc__actions">
         <button type="button" data-run-doc-copy onClick={() => { void window.canvasTTY.clipboard.writeText(md); setCopied(true); }}>{t(locale, copied ? "docCopied" : "docCopy")}</button>
-        {onNote && <button type="button" data-run-doc-note onClick={() => onNote(md)}>{t(locale, "docToCanvas")}</button>}
+        {onNote && <button type="button" data-run-doc-note onClick={() => { onNote(md); setNoted(true); }}>{t(locale, noted ? "docOnCanvas" : "docToCanvas")}</button>}
       </div>
       <h3>{doc.title}</h3>
       <p className="orch-hint">{doc.asOf}</p>

@@ -219,10 +219,13 @@ try {
   await app.waitFor(`document.querySelectorAll("[data-sticky-note-id]").length === ${notesBefore} + 1`, "a note added");
   const note = `[...document.querySelectorAll("[data-sticky-note-id]")].at(-1)`;
   const snapText = await app.ev(`${note}.querySelector("textarea").value`);
-  expect(snapText.startsWith("> Копия документа на ") && snapText.includes("план"), "«To the canvas»: a note marked as a copy of when", snapText.slice(0, 120));
+  expect(snapText.startsWith("> Копия документа на ") && snapText.includes("— план"), "«To the canvas»: a note marked as a copy of when", snapText.slice(0, 120));
   expect(await app.ev(`${note}.querySelector('[data-note-source="plan"]') !== null`), "the note shows it is a snapshot of the plan", null);
-  await app.clickEl(q(".orch-panel__close"));
-  await app.waitFor(`${q(".orch-panel")} === null`, "panel closed");
+  expect((await app.ev(`${q("[data-run-doc-note]")}.textContent`)) === "На холсте ✓", "«To the canvas» answers on the button", null);
+  const noteBtn = `${note}.querySelector("[data-note-open-source]")`;
+  const hit = await app.ev(`(() => { const b = ${noteBtn}.getBoundingClientRect(); const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e !== null && ${noteBtn}.contains(e); })()`);
+  expect(hit, "the new note is in view, not under the run panel", hit);
+  await openTab(app, "result"); // away from the plan, the panel stays open
   await app.clickEl(`${note}.querySelector("[data-note-open-source]")`);
   await app.waitFor(`${q('[data-run-doc="plan"]')} && true`, "«Open current» opens the run's plan tab");
   expect(true, "«Open current» on the note opens the current plan", null);

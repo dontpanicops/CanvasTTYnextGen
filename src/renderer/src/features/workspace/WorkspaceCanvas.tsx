@@ -648,10 +648,11 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       y: (point.y - camera.y) / camera.zoom
     };
   }, [camera.x, camera.y, camera.zoom, viewportPoint]);
-  const viewportCenterWorldPoint = useCallback((): Point => {
+  // The middle of the view; `visibleWidth` narrows it to the part left of something that covers the right side.
+  const viewportCenterWorldPoint = useCallback((visibleWidth?: number): Point => {
     const bounds = viewport.current?.getBoundingClientRect();
     return {
-      x: ((bounds?.width ?? 1) / 2 - camera.x) / camera.zoom,
+      x: (Math.min(bounds?.width ?? 1, visibleWidth ?? Infinity) / 2 - camera.x) / camera.zoom,
       y: ((bounds?.height ?? 1) / 2 - camera.y) / camera.zoom
     };
   }, [camera.x, camera.y, camera.zoom]);
@@ -674,7 +675,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const noteFromText = useCallback((markdown: string, from: { runId: string; doc: "plan" | "result" }): void => {
     const at = new Date().toISOString();
     const text = noteText(snapshotText(markdown, settings.locale, at), t(settings.locale, "docNoteCut"));
-    onCreateStickyNote({ ...stickyNoteAtPoint(viewportCenterWorldPoint(), crypto.randomUUID()), text, source: { ...from, at } });
+    // the run panel covers the right of the view: the note goes to the middle of what is left of it
+    const panelLeft = document.querySelector(".orch-panel")?.getBoundingClientRect().left;
+    const viewLeft = viewport.current?.getBoundingClientRect().left ?? 0;
+    onCreateStickyNote({ ...stickyNoteAtPoint(viewportCenterWorldPoint(panelLeft === undefined ? undefined : panelLeft - viewLeft), crypto.randomUUID()), text, source: { ...from, at } });
   }, [onCreateStickyNote, settings.locale, viewportCenterWorldPoint]);
   const launchAt = useCallback((provider: ProviderId, point?: Point): void => {
     if (provider === "terminal") onOpenTerminal(point);
@@ -1061,7 +1065,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               onBoundsChange={onStickyNoteBoundsChange}
               onTextChange={onStickyNoteTextChange}
               onClose={onDeleteStickyNote}
-              onOpenSource={(s) => openRunInWorkspace(s.runId, s.doc)}
+              onOpenSource={(s) => openRunInWorkspace(s.runId, s.doc,
+                orch.canvas.owners?.[s.runId] || orch.canvas.links.some((l) => l.runIds.includes(s.runId)) ? undefined : workspace.activeId)}
               groupSelected={marqueeSelection.has(noteLayerId(note.id))}
             />
           ))}
