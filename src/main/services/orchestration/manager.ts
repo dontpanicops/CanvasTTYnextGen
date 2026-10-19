@@ -40,7 +40,7 @@ import { checkPreparedDeps, createRegistry } from "./checks.ts";
 import type { CheckRegistry, PreparedDeps } from "./checks.ts";
 import { DEFAULT_LIMITS } from "./cycle.ts";
 import type { Goal } from "./cycle.ts";
-import { MAX_JOURNAL_BYTES, MAX_LINE_BYTES, MAX_TEXT_BYTES, TERMINAL_STATUSES, canonical, isResolutionJournal, isSha256, isTextRef, isUuid, needsRecovery, newerGoal, newerVersion, parseJournal, unfinishedWork } from "./journal.ts";
+import { MAX_JOURNAL_BYTES, MAX_LINE_BYTES, MAX_TEXT_BYTES, TERMINAL_STATUSES, canonical, isDecompositionJournal, isResolutionJournal, isSha256, isTextRef, isUuid, needsRecovery, newerGoal, newerVersion, parseJournal, unfinishedWork } from "./journal.ts";
 import type { JournalRecord, RunState, TextRef } from "./journal.ts";
 import { conditionsView, createOrchestrationService, decidedGoal, findingsView, loadConditions, possiblyStale, progressOf, runView, shownCheckKeys } from "./orchestrationService.ts";
 import type { CommandOutcome, GoalInput, RunCommand, RunHandle } from "./orchestrationService.ts";
@@ -796,7 +796,7 @@ export function createRunManager(deps: RunManagerDeps) {
         }
         facts = {
           runId, ...meta, workspaceId, status: view.status, reason: view.reason, newer: !!view.newer, halted: !!view.halted,
-          limit: view.progress?.budget?.reached ?? null, completion: view.progress?.completion ?? null,
+          limit: view.progress?.budget?.reached ?? null, completion: view.progress?.completion === "confirmed" || view.progress?.completion === "no_checks" ? view.progress.completion : null, // E1: a split run is no task run
           phase: runPhase(view, (last?.purpose as OrchestrationTurnPurpose | undefined) ?? null),
           permission: !!view.permission, workMode, taken, ...(st && isCopy(workMode) ? await touched(runId, st) : {}),
           ...(view.status === "paused" && view.reason === "environment_error" ? { providerLimit: await providerLimitOf(runId, view) } : {})
@@ -1271,9 +1271,9 @@ export function createRunManager(deps: RunManagerDeps) {
       const out: OrchestrationRunSnapshot[] = [];
       for (const id of names.filter(isUuid).sort()) {
         if (await merges.isMerge(id)) continue; // C1: a merge run is shown on the board, not as a newer version's run
-        // C3: a resolution run too — opened from its merge on the board
+        // C3: a resolution run too — opened from its merge on the board; E1: a decomposition run — from its task's card
         const head = await readFile(join(deps.root, "runs", id, "journal.jsonl")).then((b) => b.subarray(0, 4096), () => null);
-        if (head && isResolutionJournal(head)) continue;
+        if (head && (isResolutionJournal(head) || isDecompositionJournal(head))) continue;
         const s = await result(() => snapshot(id));
         if (s.ok) out.push(s.value);
       }
