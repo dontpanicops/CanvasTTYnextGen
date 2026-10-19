@@ -1540,6 +1540,7 @@ export function createRunManager(deps: RunManagerDeps) {
       closing = true;
       if (resolutionTimer) clearInterval(resolutionTimer);
       resolutionTimer = null;
+      await resolutionTick; // a merge moving in an agent's tree finishes its write before the stores close
       autopilot.shutdown();
       if (queueTimer) { clearInterval(queueTimer); queueTimer = null; }
       startQueue.length = 0;
