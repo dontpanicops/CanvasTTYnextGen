@@ -9,6 +9,8 @@
 - [план доски задач](implementation/ux-activity-and-next-stages.md#2-доска-задач);
 - [ARCHITECTURE-PROPOSAL](ARCHITECTURE-PROPOSAL.md);
 - [EXP-SPEC-01: эксперимент со спекулятивным выполнением](EXP-SPEC-01-speculative-execution.md) (этап D).
+- [Этап E: агенты разбивают задачу на подзадачи](implementation/stage-e-decomposition.md) (после C4, по просьбе владельца
+  2026-10-19).
 
 ## Целевой сценарий
 
