@@ -92,7 +92,9 @@ export interface BoardMerge {
   dir: string | null; // the merge copy, where the person resolves
   createdAt: number;
   // C3 (stage-c3-conflicts.md §2): the latest try of an agent — its resolution run; pending while the merge waits for it
-  agent?: { attempt: number; reason: "conflict" | "checks"; resolutionRunId: string; pending: boolean };
+  agent?: { attempt: number; reason: "conflict" | "checks"; resolutionRunId: string; pending: boolean;
+    // C4 (stage-c4-limits.md §3): its resolution run paused — at a provider's limit, or for the person (main fills it)
+    waits?: { kind: "limit"; provider: string; resetsAt: number | null } | { kind: "person" } };
 }
 
 // A task's mark on the board (§4.4): its latest merge into the current head of its place — of its current run (a task
@@ -122,15 +124,37 @@ export const conflictsOf = (b: AutopilotBudget): "agent" | "person" => (b.confli
 export const parallelOf = (b: AutopilotBudget): number => (Number.isInteger(b.parallel) && b.parallel! >= 1 && b.parallel! <= 4 ? b.parallel! : AUTOPILOT_PARALLEL);
 export type AutopilotStopCode = "all_done" | "others_wait" | "budget_runs" | "budget_minutes" | "run_stopped" | "run_failed" | "limit_reached"
   | "run_paused" | "run_unreadable" | "settings_changed" | "grant_added" | "not_ready" | "take_failed" | "start_failed" | "worktree_base" | "link_gone" | "task_gone"
-  | "head_moved" | "merge_failed";
+  | "head_moved" | "merge_failed" | "resume_failed";
 export interface AutopilotWaiting { key: string; reason: TaskReason | null; waitsFor: string[] }
 export interface AutopilotStop { code: AutopilotStopCode; detail: string | null; key: string | null; at: string; waiting?: AutopilotWaiting[] }
 export interface AutopilotState {
   on: boolean;
   budget: AutopilotBudget;
   used: { runs: number; minutes: number };
-  waits: string | null; // on, and waiting: for what (a run, the person)
+  waits: string | null; // on, and waiting: for what (a run, the person, provider_limit)
   stop: AutopilotStop | null;
+  // C4 (stage-c4-limits.md §2): the provider's limit it waits for (the earliest known reset), and its last continuation
+  limit?: AutopilotLimit | null;
+  resumed?: { runId: string; key: string; provider: string; at: string } | null;
+}
+
+// C4 (stage-c4-limits.md §2): a run of the place paused at a provider's limit — a task's (facts) or a resolution run's
+// (C3); own: the autopilot started it, so it may continue it; resumes: its continuations in a row so far
+export interface LimitedRun { runId: string; key: string; provider: string; resetsAt: number | null; own: boolean; resumes: number }
+export interface AutopilotLimit { provider: string; resetsAt: number | null; key: string; repeated: boolean; others: number }
+export const LIMIT_MARGIN_MS = 60_000; // the provider's clock and the Mac's may differ
+export const LIMIT_RESUMES = 3; // continuations of one run in a row, then the person's
+// What the limits leave the autopilot to do: continue its own run whose reset has come (the earliest first), else wait
+// for the earliest known reset. null: no run of the place is at a limit.
+export function limitStep(limited: readonly LimitedRun[], now: number): { kind: "resume"; runId: string; key: string; provider: string } | { kind: "wait"; why: "provider_limit"; limit: AutopilotLimit } | null {
+  if (!limited.length) return null;
+  const due = limited.filter((r) => r.own && r.resetsAt !== null && now >= r.resetsAt + LIMIT_MARGIN_MS && r.resumes < LIMIT_RESUMES)
+    .sort((a, b) => a.resetsAt! - b.resetsAt!)[0];
+  if (due) return { kind: "resume", runId: due.runId, key: due.key, provider: due.provider };
+  const known = limited.filter((r) => r.resetsAt !== null && !(r.own && r.resumes >= LIMIT_RESUMES)).sort((a, b) => a.resetsAt! - b.resetsAt!)[0];
+  const shown = known ?? limited[0]!;
+  const repeated = shown.own && shown.resumes >= LIMIT_RESUMES;
+  return { kind: "wait", why: "provider_limit", limit: { provider: shown.provider, resetsAt: repeated ? null : shown.resetsAt, key: shown.key, repeated, others: limited.length - 1 } };
 }
 
 export interface Board {
@@ -422,29 +446,35 @@ export function goalFor(task: Pick<BoardTask, "id" | "key" | "text" | "criteria"
 }
 
 // B4 (§5.2): the pauses of a run the autopilot waits through — the person answers, the run goes on
-const WAIT_PAUSES = new Set(["awaiting_answer", "plan_review", "awaiting_checks_decision", "awaiting_finish_confirmation", "awaiting_person_decision",
+export const WAIT_PAUSES = new Set(["awaiting_answer", "plan_review", "awaiting_checks_decision", "awaiting_finish_confirmation", "awaiting_person_decision",
   "stage_done", "step_done"]);
 const ACTIVE = new Set(["created", "preparing", "running", "pausing", "stopping"]);
 
 // The working time of a run by its journal: from its first record, without the pauses that wait for the person, to its
 // end or now. A permission request is not journaled: it counts as work (§5.2 — the budget ends sooner, never later).
 // waits: the pauses that wait for the person — a merge run's are all of them (C2, decision 14: its preparation and checks count)
+// C4 (stage-c4-limits.md §2.4): limitTurns — the turns a provider's limit ended (from the run's feed): the
+// environment_error pause after one is a wait too
 export function activeMs(records: readonly { ts: string; type: string; data: Record<string, unknown> }[], now: number,
-  waits: (reason: string) => boolean = (r) => WAIT_PAUSES.has(r)): number {
+  waits: (reason: string) => boolean = (r) => WAIT_PAUSES.has(r), limitTurns: ReadonlySet<string> = new Set()): number {
   let total = 0;
   let from: number | null = records.length ? Date.parse(records[0]!.ts) : null;
+  let lastTurn: string | null = null;
   for (const r of records) {
+    if (r.type === "turn.finished" && typeof r.data.turnId === "string") lastTurn = r.data.turnId;
     if (r.type !== "run.status") continue;
     const at = Date.parse(r.ts);
     const status = String(r.data.status ?? "");
-    const working = status !== "paused" ? ACTIVE.has(status) : !waits(String(r.data.reason ?? ""));
+    const reason = String(r.data.reason ?? "");
+    const working = status !== "paused" ? ACTIVE.has(status) : !(waits(reason) || (reason === "environment_error" && lastTurn !== null && limitTurns.has(lastTurn)));
     if (from !== null && !working) { total += Math.max(0, at - from); from = null; } else if (from === null && working) from = at;
   }
   return total + (from !== null ? Math.max(0, now - from) : 0);
 }
 
 export type AutopilotStep =
-  | { kind: "wait"; why: string }
+  | { kind: "wait"; why: string; limit?: AutopilotLimit }
+  | { kind: "resume"; runId: string; key: string; provider: string } // C4: continue its own run after the limit's reset
   | { kind: "take"; runId: string; key: string }
   | { kind: "start"; task: BoardTask; base: OrchestrationBaseRef | null }
   | { kind: "off"; code: AutopilotStopCode; detail: string | null; key: string | null; waiting?: AutopilotWaiting[] };
@@ -452,7 +482,10 @@ export type AutopilotStep =
 // B4 (§5.2): what the board's autopilot of a link does next, from the board and the facts of the runs alone (the
 // settings, the readiness and the start itself are main's). last: the run it started last (null: none yet).
 export function autopilotStep(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], at: { workspaceId: string; project: string; workMode: OrchestrationWorkMode },
-  last: string | null, used: { runs: number; ms: number }, budget: AutopilotBudget): AutopilotStep {
+  last: string | null, used: { runs: number; ms: number }, budget: AutopilotBudget, limited: readonly LimitedRun[] = [], now = Date.now()): AutopilotStep {
+  // C4 (§2.1): a run of the place at a provider's limit comes before anything else — no new task meanwhile
+  const limits = limitStep(limited, now);
+  if (limits) return limits;
   const statuses = boardStatuses(board, facts);
   const run = last ? facts.find((f) => f.runId === last) : undefined;
   const task = run?.taskId ? board.tasks.find((t) => t.id === run.taskId) : undefined;
@@ -514,7 +547,8 @@ const MERGE_ACTIVE = new Set(["preparing", "running"]);
 export const isCopy = (mode: OrchestrationWorkMode | null | undefined): boolean => mode === "copy" || mode === "worktree";
 // refused (C3): merges the application would not hand to an agent (a lock file, not from the head, …): the person's
 export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], at: { workspaceId: string; project: string },
-  started: readonly string[], used: { runs: number; ms: number }, budget: AutopilotBudget, head: BoardHead | null, refused: ReadonlySet<string> = new Set()): AutopilotParallelStep {
+  started: readonly string[], used: { runs: number; ms: number }, budget: AutopilotBudget, head: BoardHead | null, refused: ReadonlySet<string> = new Set(),
+  limited: readonly LimitedRun[] = [], now = Date.now()): AutopilotParallelStep {
   const statuses = boardStatuses(board, facts, head ? [head] : []);
   const place = board.tasks.filter((t) => t.workspaceId === at.workspaceId && t.project === at.project);
   const mergeOf = (taskId: string) => mergeOfTask(head, taskId, statuses.get(taskId)?.current ?? null);
@@ -535,6 +569,7 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
     else if (run.status === "stopped") halt ??= { code: "run_stopped", detail: run.reason, key };
     else if (run.status === "failed") halt ??= { code: "run_failed", detail: run.reason, key };
     else if (run.status === "paused") {
+      if (limited.some((x) => x.runId === run.runId)) continue; // C4: the limits decide below
       if (WAIT_PAUSES.has(run.reason ?? "")) person ??= "person";
       else halt ??= run.reason === "limit_reached" ? { code: "limit_reached", detail: run.limit, key } : { code: "run_paused", detail: run.reason, key };
     } else if (run.status !== "completed") { if (run.halted) halt ??= { code: "run_paused", detail: run.reason, key }; }
@@ -571,6 +606,9 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   if (ready && !merging && !merges.some((m) => m.status === "paused") && !moved) {
     return { kind: "merge", taskId: ready.t.id, key: ready.t.key, runId: ready.run!.runId, commit: ready.run!.taken!.commit! };
   }
+  // C4 (§2.1): a provider's limit — after a take and a merge (no model turn in them), before an agent, a start or a stop
+  const limits = limitStep(limited, now);
+  if (limits) return limits;
   // the slots: every run of the place that is not over (a pause holds its copy and may go on)
   const SLOT = new Set(["created", "preparing", "running", "pausing", "stopping", "paused"]);
   const busy = facts.filter((f) => place.some((t) => t.id === f.taskId) && (SLOT.has(f.status) || f.permission
