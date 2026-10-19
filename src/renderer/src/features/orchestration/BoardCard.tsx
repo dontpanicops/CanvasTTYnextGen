@@ -4,7 +4,7 @@
 import { useState } from "react";
 import type { LocaleId, SessionBounds } from "../../../../shared/contracts";
 import type { OrchestrationAgentLink } from "../../../../shared/orchestration";
-import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, isCopy, startBase, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
+import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, isCopy, startBase, taskText, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
 import { t, type TranslationKey } from "../../lib/i18n";
 import { Dialog } from "./OrchestrationDialogs";
 import { ACTIVE_STATUSES, providerName, resetTime } from "./runModel";
@@ -70,7 +70,7 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
     if (!link) { say(task.id, tr(locale, "boardNoLink", { project: task.project })); return; }
     // C2: a place with the board's merged head starts from it (its dependencies are there, decision 9); else B's base
     const base = view ? startBase(task, view.board, board.statuses, view.facts, view.heads ?? []) : null;
-    ui.openGoal(link.linkId, { id: task.id, key: task.key, title: task.title, text: task.text, criteria: task.criteria, ...(startAnyway ? { anyway: true } : {}), ...(base ? { base } : {}) });
+    ui.openGoal(link.linkId, { id: task.id, key: task.key, title: task.title, text: taskText(task, view?.board.tasks ?? [], locale === "ru" ? "ru" : "en"), criteria: task.criteria, ...(startAnyway ? { anyway: true } : {}), ...(base ? { base } : {}) });
   };
   const projects = [...new Set([...orch.canvas.agents.map((a) => a.project), ...(props.defaultProject ? [props.defaultProject] : [])])];
   const language = locale === "ru" ? "ru" : "en";

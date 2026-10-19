@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { BOARD_VERSION, type AutopilotBudget, type Board, type BoardPlace, type BoardTask, type BoardTaskInput, type BoardTaskPatch } from "../../../shared/taskBoard.ts";
+import { BOARD_VERSION, SPLIT_TEXT_MAX, subtaskText, type AutopilotBudget, type Board, type BoardPlace, type BoardTask, type BoardTaskInput, type BoardTaskPatch } from "../../../shared/taskBoard.ts";
 
 class Refusal extends Error {
   readonly code: string;
@@ -25,6 +25,7 @@ const isPlace = (p: unknown): p is BoardPlace => {
   const o = p as { position?: { x?: unknown; y?: unknown }; size?: { width?: unknown; height?: unknown } } | null;
   return !!o && coord(o.position?.x, -1e7, 1e7) && coord(o.position?.y, -1e7, 1e7) && coord(o.size?.width, 1, 1e5) && coord(o.size?.height, 1, 1e5);
 };
+const COVER = /^R([1-9]|[12]\d|3[0-2])$/;
 const time = (v: unknown) => typeof v === "string" && v.length <= 40 && !Number.isNaN(Date.parse(v));
 
 function isTask(t: unknown): t is BoardTask {
@@ -37,7 +38,12 @@ function isTask(t: unknown): t is BoardTask {
     && o.criteria.every((c) => text(c, 500)) && Array.isArray(o.dependsOn) && o.dependsOn.every((d) => typeof d === "string" && UUID.test(d))
     && typeof o.order === "number" && Number.isFinite(o.order) && time(o.createdAt) && time(o.updatedAt)
     && (o.archivedAt === null || time(o.archivedAt))
-    && (acc === null || (typeof acc === "object" && typeof acc.runId === "string" && UUID.test(acc.runId) && time(acc.at)));
+    && (acc === null || (typeof acc === "object" && typeof acc.runId === "string" && UUID.test(acc.runId) && time(acc.at)))
+    // E2 (stage-e-decomposition.md §2): absent, or well formed. A parentId with a decompose is not refused here: a hand
+    // edit never sets the board aside (it is refused when a task is made or changed)
+    && (o.decompose === undefined || o.decompose === true) && (o.decomposedBy === undefined || (typeof o.decomposedBy === "string" && UUID.test(o.decomposedBy)))
+    && (o.parentId === undefined || (typeof o.parentId === "string" && UUID.test(o.parentId)))
+    && (o.covers === undefined || (Array.isArray(o.covers) && o.covers.length >= 1 && o.covers.length <= 32 && o.covers.every((c) => typeof c === "string" && COVER.test(c))));
 }
 
 const isBudget = (p: unknown): p is AutopilotBudget => {
@@ -48,6 +54,11 @@ const isBudget = (p: unknown): p is AutopilotBudget => {
 };
 
 export type TaskInput = BoardTaskInput;
+
+// E2 (stage-e-decomposition.md §5): what the creation of subtasks takes from the decomposition run: the proposal's tasks,
+// the number of the requirements of the run's goal and its language
+export interface SplitTask { id: string; title: string; text: string; criteria: string[]; dependsOn: string[]; covers: string[] }
+export interface SplitPlan { criteria: number; language: "ru" | "en"; tasks: SplitTask[] }
 
 export interface BoardRead { board: Board; readOnly: null | "newer_version" | "damaged_unmoved"; }
 
@@ -130,7 +141,7 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
     return run;
   }
 
-  const checkInput = (b: Board, input: TaskInput, self: string | null): Required<TaskInput> => {
+  const checkInput = (b: Board, input: TaskInput, self: string | null): Required<Omit<TaskInput, "decompose">> => {
     if (typeof input?.workspaceId !== "string" || !WORKSPACE_ID.test(input.workspaceId)) refuse("invalid_task", "workspaceId");
     if (typeof input.project !== "string" || !isAbsolute(input.project)) refuse("invalid_task", "project must be an absolute path");
     if (!text(input.title, 200)) refuse("invalid_task", "title: 1..200 characters");
@@ -144,8 +155,12 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       if (!dep || dep.workspaceId !== input.workspaceId || d === self) refuse("invalid_task", `dependsOn: ${d} is not a task of this workspace`);
     }
     if (self && reaches(b, dependsOn, self)) refuse("task_cycle", "the dependencies would make a cycle");
-    return { ...input, criteria: [...input.criteria], dependsOn };
+    const { decompose: _mark, ...rest } = input; // E2: the mark is the caller's: stored as true or not at all
+    return { ...rest, criteria: [...input.criteria], dependsOn };
   };
+  const subtasksOf = (b: Board, id: string) => b.tasks.filter((x) => x.parentId === id && !x.archivedAt);
+  // E2 (§6): a marked task leaves 400 characters for the closing run's paragraph
+  const markOk = (text: string) => { if (text.length > SPLIT_TEXT_MAX) refuse("text_too_long", `to be split, the text is up to ${SPLIT_TEXT_MAX} characters`); };
 
   return {
     read: async (): Promise<BoardRead> => { await queue; return load(); },
@@ -161,7 +176,8 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       if (n > 999_999) refuse("too_many_tasks", "task numbers end at T-999999 in this workspace");
       const at = new Date().toISOString();
       const order = Math.max(0, ...b.tasks.filter((t) => t.workspaceId === ok.workspaceId).map((t) => t.order)) + 1;
-      const task: BoardTask = { id: randomUUID(), key: `T-${n}`, ...ok, order, createdAt: at, updatedAt: at, archivedAt: null, accepted: null };
+      if (input.decompose === true) markOk(ok.text);
+      const task: BoardTask = { id: randomUUID(), key: `T-${n}`, ...ok, order, createdAt: at, updatedAt: at, archivedAt: null, accepted: null, ...(input.decompose === true ? { decompose: true as const } : {}) };
       return { next: { ...b, tasks: [...b.tasks, task], counters: { ...b.counters, [ok.workspaceId]: n } }, value: task };
     }),
 
@@ -173,7 +189,18 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       const same = patch.dependsOn === undefined || (new Set(patch.dependsOn).size === new Set(t.dependsOn).size && patch.dependsOn.every((d) => t.dependsOn.includes(d)));
       const ok = checkInput(b, { ...t, ...patch }, same ? null : id);
       if (patch.order !== undefined && !Number.isFinite(patch.order)) refuse("invalid_task", "order");
-      const next: BoardTask = { ...t, ...ok, ...(patch.order !== undefined ? { order: patch.order } : {}), updatedAt: new Date().toISOString() };
+      // E2: «Split» on — a subtask has none, the text leaves room; off («Do it whole») — only without live subtasks
+      let mark: Pick<BoardTask, "decompose" | "decomposedBy"> = { ...(t.decompose ? { decompose: true as const } : {}), ...(t.decomposedBy ? { decomposedBy: t.decomposedBy } : {}) };
+      if (patch.decompose === true) {
+        if (t.parentId) refuse("invalid_task", "a subtask is not split again");
+        mark = { ...mark, decompose: true };
+      } else if (patch.decompose === false) {
+        if (subtasksOf(b, id).length) refuse("has_subtasks", "the task has subtasks");
+        mark = {};
+      }
+      if (mark.decompose && (patch.text !== undefined || patch.decompose === true)) markOk(ok.text);
+      const bare = <T extends object>(o: T): Omit<T, "decompose" | "decomposedBy"> => { const { decompose: _d, decomposedBy: _by, ...r } = o as T & Partial<Pick<BoardTask, "decompose" | "decomposedBy">>; return r; }; // ok carries t's own marks
+      const next: BoardTask = { ...bare(t), ...bare(ok), ...mark, ...(patch.order !== undefined ? { order: patch.order } : {}), updatedAt: new Date().toISOString() };
       return { next: { ...b, tasks: b.tasks.map((x) => (x.id === id ? next : x)) }, value: next };
     }),
 
@@ -197,6 +224,39 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       if (unseen.length) refuse("task_has_dependents", `${unseen.map((x) => x.key).join(", ")} depend on it: confirm to remove the link`);
       const tasks = b.tasks.filter((x) => x.id !== id).map((x) => (x.dependsOn.includes(id) ? { ...x, dependsOn: x.dependsOn.filter((d) => d !== id) } : x));
       return { next: { ...b, tasks }, value: null };
+    }),
+
+    // E2 (stage-e-decomposition.md §5, §5.1): the subtasks of a parent, made by the decomposition run `runId` in ONE write —
+    // the subtasks, the parent's new dependsOn and its decomposedBy. The same run twice: nothing (what the person deleted
+    // does not come back). A refusal's code is the detail of §5.1.
+    split: (parentId: string, runId: string, plan: SplitPlan) => change(async (b): Promise<{ next: Board | null; value: { created: false } | { created: true; keys: string[] } }> => {
+      const p = b.tasks.find((x) => x.id === parentId);
+      if (!p) return refuse("parent_gone", "the task is gone");
+      if (p.decomposedBy === runId) return { next: null, value: { created: false } };
+      if (p.archivedAt) refuse("parent_gone", "the task is archived");
+      if (subtasksOf(b, parentId).length) refuse("has_subtasks", "the task has subtasks");
+      if (!p.decompose) refuse("not_marked", "«Split» was unmarked");
+      if (p.criteria.length !== plan.criteria) refuse("requirements_changed", "the requirements changed during the split");
+      if (b.tasks.length + plan.tasks.length > MAX_TASKS) refuse("too_many_tasks", `at most ${MAX_TASKS} tasks`);
+      const inFile = Math.max(b.counters[p.workspaceId] ?? 0, ...b.tasks.filter((t) => t.workspaceId === p.workspaceId).map((t) => Number(KEY.exec(t.key)![1])));
+      const first = Math.max(inFile, await usedKeys(p.workspaceId)) + 1;
+      if (first + plan.tasks.length - 1 > 999_999) refuse("too_many_tasks", "task numbers end at T-999999 in this workspace");
+      // the place in the queue: between the parent and the next task of its workspace, in the proposal's order
+      const after = b.tasks.filter((t) => t.workspaceId === p.workspaceId && t.order > p.order).map((t) => t.order);
+      const gap = (after.length ? Math.min(...after) : p.order + 1) - p.order;
+      const at = new Date().toISOString();
+      const ids = new Map(plan.tasks.map((t) => [t.id, randomUUID()]));
+      const k = plan.tasks.length;
+      const made: BoardTask[] = plan.tasks.map((t, i) => ({
+        id: ids.get(t.id)!, key: `T-${first + i}`, workspaceId: p.workspaceId, project: p.project, title: t.title,
+        text: subtaskText(t.text, p, t.covers, plan.language), criteria: [...t.criteria],
+        // a subtask without dependencies in the proposal goes on from where the parent would have
+        dependsOn: t.dependsOn.length ? t.dependsOn.map((d) => ids.get(d)!) : [...p.dependsOn],
+        order: p.order + ((i + 1) / (k + 1)) * gap, createdAt: at, updatedAt: at, archivedAt: null, accepted: null, parentId: p.id, covers: [...t.covers]
+      }));
+      const parent: BoardTask = { ...p, dependsOn: [...p.dependsOn, ...made.map((t) => t.id)], decomposedBy: runId, updatedAt: at };
+      return { next: { ...b, tasks: [...b.tasks.map((x) => (x.id === parentId ? parent : x)), ...made], counters: { ...b.counters, [p.workspaceId]: first + k - 1 } },
+        value: { created: true, keys: made.map((t) => t.key) } };
     }),
 
     // B2: the board card's place on a workspace's canvas; null: off that canvas (the tasks stay)

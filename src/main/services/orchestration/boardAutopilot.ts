@@ -186,7 +186,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       return added.length ? off(linkId, "grant_added", added.map((g) => `${g.provider}: ${g.summary}`).join("; "), next.task.key)
         : off(linkId, "settings_changed", null, next.task.key);
     }
-    const goal = goalFor(next.task, profile, { optionalChecks: deps.optionalChecks, language: l.language, base: next.base });
+    const goal = goalFor(next.task, profile, { optionalChecks: deps.optionalChecks, language: l.language, base: next.base, tasks: board.tasks });
     if (!l.pending) {
       const ready = await deps.readiness({ linkId, commands: goal.commands ?? [], workMode: profile.workMode, ...(goal.models ? { models: goal.models } : {}) });
       if (!ready.ok && LATER.has(ready.code)) { l.waits = "run"; return; }
