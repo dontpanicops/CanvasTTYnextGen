@@ -21,6 +21,10 @@ export const READER_VERSION = 2;
 // The first record of a v2 journal declares it (journal-v2-format.md §3.1): a build that reads v1 only (1.5.7, A0)
 // shows it read only, never as a state it would get wrong.
 export const V2_MIN_READER_VERSION = 2;
+// C3 (stage-c3-conflicts.md §7.2): a resolution run's journal — envelope v3 with minReaderVersion 3 (1.5.8–1.5.19 show it
+// read only, created by a newer version), replayed here by the rules of v2 plus two forms of its own: run.created names
+// its kind, and plan.recorded may be the application's (by «app», no turn). Every other journal v3 stays a newer one.
+export const RESOLUTION_VERSION = 3;
 // check.started.profileSha256 of a check run in the user's login shell without a sandbox (userCheck.ts, stage 12)
 export const NO_SANDBOX_SHA256 = createHash("sha256").update("canvastty:no-sandbox:user-shell").digest("hex");
 export const ZERO_HASH = "0".repeat(64);
@@ -111,7 +115,7 @@ export type V2Event = (typeof V2_EVENTS)[number];
 export type CommandResult = { status: "accepted" | "rejected"; code: string | null };
 
 export interface JournalRecord {
-  v: 1 | 2;
+  v: 1 | 2 | 3; // 3: a resolution run's (C3)
   minReaderVersion?: number; // v2: the first record only
   formatPreview?: true; // v2: the first record of a journal written by a development build of A1–A3 (A4 writes none)
   seq: number;
@@ -191,7 +195,8 @@ export interface CheckState {
 export type CompletionKind = "confirmed" | "no_checks";
 export interface RunState {
   runId: string;
-  version: 1 | 2; // the first record's v (journal-v2-format.md §1)
+  version: 1 | 2; // the rules it is replayed by: the first record's v (journal-v2-format.md §1); 2 for a resolution run
+  envelope?: 3; // C3: the v each line carries when it is not `version` (a resolution run's journal)
   preview: boolean; // v2 written by a development build of A1–A3 (formatPreview)
   completion: { kind: CompletionKind; basis: TextRef } | null; // v2: the completed status' result of the completion function
   status: RunStatus;
@@ -220,7 +225,8 @@ export interface PlanRecordedData { turnId: string; version: number; plan: TextR
 // conditionsAssigned absent: a plan of A1's form or of v1 (no conditions; journal-v2-format.md §2.7)
 // base: the first number C<base> its new conditions take (v2: from the records' conditionsAssigned, proposals included);
 // proposed: in force by the person's plan.decided(accept) of a proposal (A4)
-export interface PlanState { version: number; turnId: string; ref: TextRef; firstStage: number; stageCount: number; conditionsAssigned?: number; seq: number; base?: number; proposed?: true }
+// turnId null: the application's plan of a resolution run (C3)
+export interface PlanState { version: number; turnId: string | null; ref: TextRef; firstStage: number; stageCount: number; conditionsAssigned?: number; seq: number; base?: number; proposed?: true }
 // A4 (5h §2.4, §3.6): a plan that drops conditions or requirements, waiting for the person; never in force by itself
 export interface ProposalState {
   turnId: string; ref: TextRef; firstStage: number; stageCount: number; conditionsAssigned: number; base: number; seq: number;
@@ -609,7 +615,17 @@ const DATA_SCHEMAS_V2: Record<string, (d: Record<string, unknown>) => boolean> =
 };
 const isConditionId = (v: unknown): v is string => typeof v === "string" && /^C[1-9]\d{0,5}$/.test(v);
 const isFindingId = (v: unknown): v is string => typeof v === "string" && /^F[1-9]\d{0,5}$/.test(v);
-const schemasOf = (version: number): Record<string, (d: Record<string, unknown>) => boolean> => version === 2 ? DATA_SCHEMAS_V2 : DATA_SCHEMAS;
+// C3: a resolution run's records — v2's, its run.created with its kind, and the application's plan beside the lead's
+const DATA_SCHEMAS_RESOLUTION: Record<string, (d: Record<string, unknown>) => boolean> = {
+  ...DATA_SCHEMAS_V2,
+  "run.created": (d) => exactKeys(d, ["goal", "kind"]) && isTextRef(d.goal) && d.kind === "resolution",
+  "plan.recorded": (d) => Object.hasOwn(d, "by")
+    ? exactKeys(d, ["by", "version", "plan", "firstStage", "stageCount", "conditionsAssigned"]) && d.by === "app" && d.version === 1 && isTextRef(d.plan)
+      && d.firstStage === 1 && isInt(d.stageCount) && d.stageCount >= 1 && d.stageCount <= 50 && isInt(d.conditionsAssigned) && d.conditionsAssigned >= 0 && d.conditionsAssigned <= 600
+    : DATA_SCHEMAS_V2["plan.recorded"](d)
+};
+const schemasOf = (version: number): Record<string, (d: Record<string, unknown>) => boolean> =>
+  version === RESOLUTION_VERSION ? DATA_SCHEMAS_RESOLUTION : version === 2 ? DATA_SCHEMAS_V2 : DATA_SCHEMAS;
 
 export function isValidEventData(type: string, data: unknown, version = 1): boolean {
   const schemas = schemasOf(version);
@@ -619,9 +635,9 @@ export function isValidEventData(type: string, data: unknown, version = 1): bool
 // The envelope keys a v2 journal's first record adds (journal-v2-format.md §1).
 export interface FirstRecordHead { minReaderVersion: number; formatPreview?: true }
 
-// Record without "hash" -> hash -> line. The caller checks MAX_LINE_BYTES. version 2: head goes into the first record.
+// Record without "hash" -> hash -> line. The caller checks MAX_LINE_BYTES. version 2 or 3: head goes into the first record.
 export function buildRecord(prev: { seq: number; hash: string } | null, runId: string, ts: string, type: EventType,
-  data: Record<string, unknown>, version: 1 | 2 = 1, head: FirstRecordHead | null = null): { record: JournalRecord; line: Buffer } {
+  data: Record<string, unknown>, version: 1 | 2 | 3 = 1, head: FirstRecordHead | null = null): { record: JournalRecord; line: Buffer } {
   const body = { v: version, seq: prev ? prev.seq + 1 : 0, ts, runId, type, prevHash: prev ? prev.hash : ZERO_HASH, data,
     ...(prev === null && head ? head : {}) };
   const record: JournalRecord = { ...body, hash: sha256Hex(canonical(body)) };
@@ -637,7 +653,7 @@ export function applyRecord(state: RunState | null, rec: JournalRecord): RunStat
   if (state === null) {
     if (rec.type !== "run.created") conflict("the first record must be run.created");
     return {
-      runId: rec.runId, version: rec.v, preview: rec.formatPreview === true, completion: null,
+      runId: rec.runId, version: rec.v === RESOLUTION_VERSION ? 2 : rec.v, ...(rec.v === RESOLUTION_VERSION ? { envelope: RESOLUTION_VERSION } : {}), preview: rec.formatPreview === true, completion: null,
       status: "preparing", pausedReason: null, lastSeq: rec.seq, lastHash: rec.hash,
       goal: d.goal as TextRef, turns: {}, commands: {}, workspace: null, checks: {},
       orch: {
@@ -871,6 +887,15 @@ function applyOrchRecord(state: RunState, rec: JournalRecord): void {
       break;
     }
     case "plan.recorded": {
+      // C3: the application's plan of a resolution run — its first record after the workspace, before any turn
+      if (d.by === "app") {
+        if (o.plan || Object.keys(state.turns).length || !state.workspace) conflict("the application's plan comes first, after the workspace");
+        o.plan = { version: 1, turnId: null, ref: d.plan as TextRef, firstStage: 1, stageCount: d.stageCount as number,
+          conditionsAssigned: d.conditionsAssigned as number, base: o.nextCondition, seq: rec.seq };
+        o.nextCondition += d.conditionsAssigned as number;
+        o.plans.push(o.plan);
+        break;
+      }
       completedTurn(d.turnId as string, ["plan"]);
       // v2: the plan of the turn that proposed check commands is recorded only after they are accepted, with no other
       // turn in between; after «Изменить» that turn's plan is dropped (journal-v2-format.md §2.4)
@@ -1452,13 +1477,14 @@ export function parseLine(bytes: Uint8Array, runId: string, prev: { seq: number;
     throw new JournalError("invalid_json", "line is not JSON");
   }
   if (!isRecord(value)) throw new JournalError("invalid_event", "record is not an object");
-  if (value.v !== version) throw new JournalError(own && version === 2 ? "invalid_event" : "unsupported_version", `version ${String(value.v)}`);
+  if (value.v !== version) throw new JournalError(own && version >= 2 ? "invalid_event" : "unsupported_version", `version ${String(value.v)}`);
   let canon: string | null = null;
   try {
     canon = canonical(value);
   } catch { /* e.g. 1e999 parsed as Infinity */ }
   if (canon !== text) throw new JournalError("non_canonical", "line is not canonical JSON");
-  const head = version === 2 && prev === null ? { minReaderVersion: V2_MIN_READER_VERSION, ...(Object.hasOwn(value, "formatPreview") ? { formatPreview: true } : {}) } : {};
+  const head = version === RESOLUTION_VERSION && prev === null ? { minReaderVersion: RESOLUTION_VERSION }
+    : version === 2 && prev === null ? { minReaderVersion: V2_MIN_READER_VERSION, ...(Object.hasOwn(value, "formatPreview") ? { formatPreview: true } : {}) } : {};
   const envelope = own ? exactKeys(value, [...RECORD_KEYS, ...Object.keys(head)]) && Object.entries(head).every(([k, v]) => value[k] === v)
       && isValidEventData(String(value.type), value.data, version)
     : RECORD_KEYS.every((k) => Object.hasOwn(value, k)) && isRecord(value.data);
@@ -1502,7 +1528,8 @@ export function parseJournal(buf: Uint8Array, runId: string, opts: ReaderOptions
   // newer only by previewReadOnly (its version is this build's own): an A1–A3 development journal, said as such
   if (newer !== null) return parseNewerJournal(buf, runId, newer, opts.readerVersion ?? READER_VERSION, newer <= (opts.maxVersion ?? MAX_JOURNAL_VERSION));
   if (buf.length > MAX_JOURNAL_BYTES) return corrupt("journal_too_large");
-  const version = firstVersion(buf) === 2 ? 2 : JOURNAL_VERSION; // by the first record; a mismatch later is the line's error
+  // by the first record; a mismatch later is the line's error
+  const version = firstVersion(buf) === 2 ? 2 : isResolutionJournal(buf) ? RESOLUTION_VERSION : JOURNAL_VERSION;
   while (offset < buf.length) {
     const nl = buf.indexOf(0x0a, offset);
     if (nl < 0) {
@@ -1538,6 +1565,10 @@ function firstRecord(buf: Uint8Array): Record<string, unknown> | null {
   }
 }
 const firstVersion = (buf: Uint8Array): unknown => firstRecord(buf)?.v;
+// C3: the first line of a resolution run's journal — v3, minReaderVersion 3, run.created of kind «resolution»
+const isResolutionHead = (r: Record<string, unknown>): boolean =>
+  r.v === RESOLUTION_VERSION && r.minReaderVersion === RESOLUTION_VERSION && r.type === "run.created" && isRecord(r.data) && r.data.kind === "resolution";
+export const isResolutionJournal = (buf: Uint8Array): boolean => { const r = firstRecord(buf); return !!r && isResolutionHead(r); };
 
 // minReaderVersion of a newer journal's first record: an integer, or null (absent, not an integer, unreadable).
 export function minReaderVersion(buf: Uint8Array): number | null {
@@ -1571,6 +1602,8 @@ export function newerVersion(buf: Uint8Array, maxVersion = MAX_JOURNAL_VERSION, 
   const first = firstRecord(buf);
   const v = first?.v;
   if (!isInt(v) || v <= JOURNAL_VERSION) return null;
+  // C3: a resolution run's journal is this build's own (read as 1.5.19 would — maxVersion below 2 — it is a newer one)
+  if (v === RESOLUTION_VERSION && maxVersion >= 2 && isResolutionHead(first!)) return null;
   return v > maxVersion || (v === 2 && previewReadOnly && first!.formatPreview === true) ? v : null;
 }
 

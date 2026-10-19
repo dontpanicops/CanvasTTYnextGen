@@ -25,6 +25,9 @@ export interface BoardAutopilotDeps {
   head(workspaceId: string, project: string): Promise<BoardHead | null>;
   ensureHead(workspaceId: string, project: string): Promise<void>;
   merge(input: { workspaceId: string; project: string; task: { id: string; key: string }; taskRunId: string; commit: string; language: "ru" | "en" }): Promise<R<{ runId: string } | { already: true }>>;
+  // C3 (stage-c3-conflicts.md §9): a paused merge handed to an agent (its resolution run), or set to wait for a slot / the person
+  toAgent?(mergeRunId: string, language: "ru" | "en"): Promise<R<{ runId: string }>>;
+  mergeWait?(mergeRunId: string, why: "merge_waits_slot" | "merge_budget"): Promise<R<void>>;
   newId(): string;
   now(): number;
 }
@@ -38,6 +41,8 @@ interface Live {
   print: string; // the profile's fingerprint when turned on
   grants: OrchestrationProjectProfile["grants"];
   started: string[];
+  agents: string[]; // C3: the resolution runs it started — runs and minutes of its budget
+  refused: Set<string>; // C3: merges the application would not hand to an agent: the person's
   pending: string | null; // a start asked and not answered yet (a refusal clears it; an error turns the autopilot off)
   waits: string | null;
   busy: boolean;
@@ -68,11 +73,11 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
   // on — its own and the person's, the updates from HEAD too: their preparation and checks, never a pause for the person
   async function used(l: Live, head?: BoardHead | null): Promise<{ runs: number; ms: number }> {
     let ms = 0;
-    for (const id of l.started) ms += activeMs(await deps.journal(id).catch(() => []), deps.now());
+    for (const id of [...l.started, ...l.agents]) ms += activeMs(await deps.journal(id).catch(() => []), deps.now());
     const merges = (head === undefined ? await deps.head(l.workspaceId, l.project).catch(() => null) : head)?.merges ?? [];
     for (const m of merges) if (m.createdAt >= l.since) l.merges.add(m.runId);
     for (const id of l.merges) ms += activeMs(await deps.journal(id).catch(() => []), deps.now(), () => true);
-    return { runs: l.started.length, ms };
+    return { runs: l.started.length + l.agents.length, ms };
   }
 
   async function tick(linkId: string): Promise<void> {
@@ -93,7 +98,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
     // C1: a separate copy goes with N slots and the board's merged head (C2: a worktree too); the project folder as in B
     const head = isCopy(profile.workMode) ? await deps.head(at.workspaceId, at.project) : null;
     const next = isCopy(profile.workMode)
-      ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head)
+      ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head, l.refused)
       : autopilotStep(board, facts, { ...at, workMode: profile.workMode }, l.started.at(-1) ?? null, await used(l, null), await budgetOf(linkId));
     l.waits = next.kind === "wait" ? next.why : null;
     if (next.kind === "wait") return;
@@ -103,6 +108,21 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       const r = await deps.merge({ workspaceId: at.workspaceId, project: at.project, task: { id: next.taskId, key: next.key }, taskRunId: next.runId, commit: next.commit, language: l.language });
       // another merge into this head goes on or waits for the person: the next step sees it
       if (!r.ok && r.code !== "merge_busy") return off(linkId, "merge_failed", r.code, next.key);
+      return;
+    }
+    if (next.kind === "merge_wait") {
+      const r = await deps.mergeWait?.(next.mergeRunId, next.why);
+      if (r && !r.ok && r.code !== "merge_not_paused") return off(linkId, "merge_failed", r.code, next.key);
+      return;
+    }
+    if (next.kind === "agent") {
+      // the settings as when it was turned on (§6: the rights of the resolution run are the profile's, as for a task)
+      if (fingerprint(profile) !== l.print) return off(linkId, "settings_changed", null, next.key);
+      if (!deps.toAgent) { l.refused.add(next.mergeRunId); return; }
+      const r = await deps.toAgent(next.mergeRunId, l.language);
+      if (r.ok) { l.agents.push(r.value.runId); return; }
+      // the application would not hand this one to an agent: it waits for the person; a merge that no longer waits: the next step sees it
+      if (r.code !== "merge_not_paused") l.refused.add(next.mergeRunId);
       return;
     }
     if (next.kind === "take") {
@@ -151,7 +171,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       const at = await deps.link(linkId);
       if (!at) throw Object.assign(new Error("no such link"), { code: "link_not_found" });
       const profile = await deps.profile(at.project);
-      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], pending: null, waits: null, busy: false });
+      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], refused: new Set(), pending: null, waits: null, busy: false });
       stops.delete(linkId);
       // the first step on the next beat; the timer alone never keeps the process up
       timer ??= setInterval(() => { for (const id of live.keys()) void tick(id); }, tickMs);

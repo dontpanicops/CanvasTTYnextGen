@@ -43,7 +43,8 @@ function isTask(t: unknown): t is BoardTask {
 const isBudget = (p: unknown): p is AutopilotBudget => {
   const b = p as AutopilotBudget | null;
   return !!b && typeof b === "object" && Number.isInteger(b.runs) && b.runs >= 1 && b.runs <= 100 && Number.isInteger(b.minutes) && b.minutes >= 1 && b.minutes <= 1440
-    && (b.parallel === undefined || (Number.isInteger(b.parallel) && b.parallel >= 1 && b.parallel <= 4));
+    && (b.parallel === undefined || (Number.isInteger(b.parallel) && b.parallel >= 1 && b.parallel <= 4))
+    && (b.conflicts === undefined || b.conflicts === "agent" || b.conflicts === "person");
 };
 
 export type TaskInput = BoardTaskInput;
@@ -213,7 +214,9 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       if (budget !== null && !isBudget(budget)) refuse("invalid_task", "budget: runs 1..100, minutes 1..1440, parallel 1..4");
       const { [linkId]: _, ...rest } = b.autopilot ?? {};
       // C1 (§5.1): the parallelism goes with the budget; 1.5.15–1.5.16 write runs and minutes only (back to the default)
-      const autopilot = budget ? { ...rest, [linkId]: { runs: budget.runs, minutes: budget.minutes, ...(budget.parallel !== undefined ? { parallel: budget.parallel } : {}) } } : rest;
+      // C3: «Конфликты» too (1.5.15–1.5.19 drop it the same way: back to «to an agent»)
+      const autopilot = budget ? { ...rest, [linkId]: { runs: budget.runs, minutes: budget.minutes, ...(budget.parallel !== undefined ? { parallel: budget.parallel } : {}),
+        ...(budget.conflicts !== undefined ? { conflicts: budget.conflicts } : {}) } } : rest;
       return { next: { ...b, autopilot }, value: null };
     }),
 

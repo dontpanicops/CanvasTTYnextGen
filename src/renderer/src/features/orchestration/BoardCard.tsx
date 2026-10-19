@@ -4,7 +4,7 @@
 import { useState } from "react";
 import type { LocaleId, SessionBounds } from "../../../../shared/contracts";
 import type { OrchestrationAgentLink } from "../../../../shared/orchestration";
-import { AUTOPILOT_BUDGET, isCopy, startBase, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
+import { AUTOPILOT_BUDGET, conflictsOf, isCopy, startBase, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
 import { t } from "../../lib/i18n";
 import { Dialog } from "./OrchestrationDialogs";
 import { ACTIVE_STATUSES } from "./runModel";
@@ -102,7 +102,7 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
           onBudget={async (b) => { const r = await board.budget(l.linkId, b); const f = failure(r); if (f) say(null, f); }} />
       ))}
       {view && !readOnly && heads.map((h) => (
-        <HeadRow key={h.ref} locale={locale} head={h} tasks={tasks} statuses={board.statuses} facts={view.facts} board={board} workspaceId={workspaceId} say={(text) => say(null, text)} failure={failure} />
+        <HeadRow key={h.ref} locale={locale} head={h} tasks={tasks} statuses={board.statuses} facts={view.facts} board={board} workspaceId={workspaceId} say={(text) => say(null, text)} failure={failure} openRun={(id) => ui.openRunById(id)} />
       ))}
       {board.failed && !view && <p className="board-card__message" role="alert">{t(locale, "boardLoadFailed")} ({board.failed})</p>}
       {message && !message.taskId && <p className="board-card__message" role="alert">{message.text}</p>}
@@ -143,7 +143,7 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                   const mark = st.done ? mergeMark(task.id, head, st.current) : null;
                   // decision 15: «already in the result» when nothing was merged; «without checks» only when there were none
                   const markText = mark && (mark.kind === "in_board" ? t(locale, mark.already ? "boardMark_in_board_already" : mark.checks ? "boardMark_in_board" : "boardMark_in_board_nochecks")
-                    : mark.kind === "merging" ? t(locale, "boardMark_merging") : tr(locale, "boardMark_not_merged", { reason: tr(locale, `boardMergeReason_${mark.reason}`) || mark.reason }));
+                    : mark.kind === "merging" ? t(locale, mark.agent ? "boardMark_merging_agent" : "boardMark_merging") : tr(locale, "boardMark_not_merged", { reason: tr(locale, `boardMergeReason_${mark.reason}`) || mark.reason }));
                   const canMerge = !!st.done && isCopy(fact?.workMode) && (!mark || (mark.kind === "not_merged" && !mark.waits));
                   // C2: a start waiting for a place (decision 12), and the files it shares with others (§4.7)
                   const queued = view?.queued?.find((q) => q.taskId === task.id);
@@ -345,9 +345,10 @@ function AutopilotRow({ locale, state, project, many, onSet, onBudget }: {
   const [runs, setRuns] = useState(String(budget.runs));
   const [minutes, setMinutes] = useState(String(budget.minutes));
   const [parallel, setParallel] = useState(String(parallelOf(budget)));
+  const [conflicts, setConflicts] = useState(conflictsOf(budget));
   const name = project.split("/").filter(Boolean).at(-1) ?? project;
   const valid = /^\d+$/.test(runs) && +runs >= 1 && +runs <= 100 && /^\d+$/.test(minutes) && +minutes >= 1 && +minutes <= 1440 && /^[1-4]$/.test(parallel);
-  const changed = valid && (+runs !== budget.runs || +minutes !== budget.minutes || +parallel !== parallelOf(budget));
+  const changed = valid && (+runs !== budget.runs || +minutes !== budget.minutes || +parallel !== parallelOf(budget) || conflicts !== conflictsOf(budget));
   return (
     <div className="board-card__autopilot" data-board-autopilot={state?.on ? "on" : "off"}>
       {many && <span className="board-card__autopilot-link">{tr(locale, "boardApLink", { project: name })}</span>}
@@ -356,6 +357,7 @@ function AutopilotRow({ locale, state, project, many, onSet, onBudget }: {
           <strong data-board-autopilot-on>{t(locale, "boardApOn")}</strong>
           {state.waits && <span data-board-autopilot-waits={state.waits}>{tr(locale, `boardApWaits_${state.waits}`)}</span>}
           <span data-board-autopilot-parallel>{tr(locale, "boardApOnParallel", { n: parallelOf(budget) })}</span>
+          <span data-board-autopilot-conflicts={conflictsOf(budget)}>{`${t(locale, "boardApConflicts")}: ${t(locale, `boardApConflicts_${conflictsOf(budget)}`)}`}</span>
           <span data-board-autopilot-used>{tr(locale, "boardApUsed", { runs: state.used.runs, maxRuns: budget.runs, minutes: state.used.minutes, maxMinutes: budget.minutes })}</span>
           <button type="button" data-board-autopilot-off onClick={() => void onSet(false)}>{t(locale, "boardApOff")}</button>
         </>
@@ -365,12 +367,18 @@ function AutopilotRow({ locale, state, project, many, onSet, onBudget }: {
           <label>{t(locale, "boardApBudget")}: <input type="number" min={1} max={100} value={runs} onChange={(e) => setRuns(e.target.value)} data-board-budget-runs /> {t(locale, "boardApBudgetRuns")}</label>
           <label><input type="number" min={1} max={1440} value={minutes} onChange={(e) => setMinutes(e.target.value)} data-board-budget-minutes /> {t(locale, "boardApBudgetMinutes")}</label>
           <label title={t(locale, "boardApParallelHint")}><input type="number" min={1} max={4} value={parallel} onChange={(e) => setParallel(e.target.value)} data-board-budget-parallel /> {t(locale, "boardApParallelHint")}</label>
-          <button type="button" data-board-autopilot-yes disabled={!valid} onClick={async () => { if (changed) await onBudget({ runs: +runs, minutes: +minutes, parallel: +parallel }); setAsking(false); await onSet(true); }}>{t(locale, "boardApToggle")}</button>
+          {/* C3 (stage-c3-conflicts.md §8): who resolves a merge conflict */}
+          <label title={t(locale, "boardApConflictsHint")}>{t(locale, "boardApConflicts")}:{" "}
+            <select value={conflicts} onChange={(e) => setConflicts(e.target.value === "person" ? "person" : "agent")} data-board-budget-conflicts>
+              <option value="agent">{t(locale, "boardApConflicts_agent")}</option>
+              <option value="person">{t(locale, "boardApConflicts_person")}</option>
+            </select></label>
+          <button type="button" data-board-autopilot-yes disabled={!valid} onClick={async () => { if (changed) await onBudget({ runs: +runs, minutes: +minutes, parallel: +parallel, conflicts }); setAsking(false); await onSet(true); }}>{t(locale, "boardApToggle")}</button>
           <button type="button" onClick={() => setAsking(false)}>{t(locale, "cancel")}</button>
         </span>
       ) : (
         <>
-          <button type="button" data-board-autopilot-start onClick={() => { setRuns(String(budget.runs)); setMinutes(String(budget.minutes)); setParallel(String(parallelOf(budget))); setAsking(true); }}>{t(locale, "boardApToggle")}</button>
+          <button type="button" data-board-autopilot-start onClick={() => { setRuns(String(budget.runs)); setMinutes(String(budget.minutes)); setParallel(String(parallelOf(budget))); setConflicts(conflictsOf(budget)); setAsking(true); }}>{t(locale, "boardApToggle")}</button>
           {state?.stop && <span className="board-card__autopilot-stop" role="status" data-board-autopilot-stop={state.stop.code}>{tr(locale, "boardApLast", { reason: stopText(locale, state.stop) })}</span>}
         </>
       )}
@@ -378,12 +386,15 @@ function AutopilotRow({ locale, state, project, many, onSet, onBudget }: {
   );
 }
 
+// C3: what a paused merge may be handed to an agent from (the application still refuses a lock file, a task not from the head)
+const TO_AGENT = new Set(["merge_conflict", "merge_checks_failed", "merge_agent_failed", "merge_waits_slot", "merge_budget"]);
+
 // C1 (stage-c-parallel.md §4.1, §4.3, §6.1): the board's merged head of a project — what is in it and whether its checks
 // passed; the tasks «Done» from it and not in it; a merge that waits for the person, with its copy and its choices; and
 // the person's own actions on it. Nothing here is automatic.
-function HeadRow({ locale, head, tasks, statuses, facts, board, workspaceId, say, failure }: {
+function HeadRow({ locale, head, tasks, statuses, facts, board, workspaceId, say, failure, openRun }: {
   locale: LocaleId; head: BoardHead; tasks: BoardTask[]; statuses: ReadonlyMap<string, TaskStatus>; facts: readonly RunTaskFacts[]; board: Board;
-  workspaceId: string; say(text: string): void; failure(r: { ok: boolean; code?: string; message?: string }): string | null;
+  workspaceId: string; say(text: string): void; failure(r: { ok: boolean; code?: string; message?: string }): string | null; openRun(runId: string): void;
 }): React.JSX.Element {
   const [asking, setAsking] = useState<null | "branch" | "apply" | "new" | "update">(null);
   const [answer, setAnswer] = useState<{ runId: string; kind: "unresolved" | "confirm"; files: string[] } | null>(null);
@@ -426,7 +437,10 @@ function HeadRow({ locale, head, tasks, statuses, facts, board, workspaceId, say
       <div className="board-card__head-line">
         <strong data-board-head-tasks>{keys.length ? tr(locale, "boardHeadTasks", { keys: keys.join(", ") }) : t(locale, "boardHeadEmpty")}</strong>
         {checks && <span data-board-head-checks={merged.some((m) => m.completion === "no_checks") ? "none" : "passed"}>{` · ${checks}`}</span>}
-        {going && <span data-board-head-merging>{` · ${tr(locale, "boardHeadMerging", { key: nameOf(going) })}`}</span>}
+        {going && !going.agent?.pending && <span data-board-head-merging>{` · ${tr(locale, "boardHeadMerging", { key: nameOf(going) })}`}</span>}
+        {/* C3: an agent resolves the conflict — its resolution run opens from here (it is on no link) */}
+        {going?.agent?.pending && <span data-board-head-agent={going.agent.resolutionRunId}>{` · ${tr(locale, "boardHeadAgent", { key: nameOf(going) })} `}
+          <button type="button" data-board-head-agent-open onClick={() => openRun(going.agent!.resolutionRunId)}>{t(locale, "orchOpenRun")}</button></span>}
         <span className="board-card__header-actions">
           {keys.length > 0 && <button type="button" data-board-head-branch onClick={() => setAsking("branch")}>{t(locale, "boardHeadBranch")}</button>}
           {keys.length > 0 && <button type="button" data-board-head-apply onClick={() => setAsking("apply")}>{t(locale, "boardHeadApply")}</button>}
@@ -461,6 +475,9 @@ function HeadRow({ locale, head, tasks, statuses, facts, board, workspaceId, say
           <strong>{tr(locale, "boardMergeWaits", { key: nameOf(waits), why: tr(locale, `boardMergeReason_${waits.reason}`) || String(waits.reason) })}</strong>
           {waits.conflicts.length > 0 && <p data-board-merge-conflicts>{tr(locale, "boardMergeConflictFiles", { files: waits.conflicts.join(", ") })}</p>}
           {waits.reason === "merge_checks_failed" && <p>{t(locale, "boardMergeChecksFailed")}</p>}
+          {waits.reason === "merge_agent_failed" && <p data-board-merge-agent-why={waits.detail ?? ""}>{tr(locale, `boardMergeAgentWhy_${(waits.detail ?? "failed").split(":")[0]}`, { detail: waits.detail ?? "" }) || waits.detail}</p>}
+          {waits.agent && <p>
+            <button type="button" data-board-merge-agent-open onClick={() => openRun(waits.agent!.resolutionRunId)}>{t(locale, "boardMergeAgentOpen")}</button></p>}
           <p className="orch-hint">{t(locale, "boardMergeHow")}</p>
           {answer?.runId === waits.runId && <p className="orch-hint orch-hint--warn" data-board-merge-answer={answer.kind}>
             {tr(locale, answer.kind === "unresolved" ? "boardMergeUnresolved" : "boardMergeOutside", { files: answer.files.join(", ") })}</p>}
@@ -469,6 +486,9 @@ function HeadRow({ locale, head, tasks, statuses, facts, board, workspaceId, say
             {answer?.runId === waits.runId && answer.kind === "confirm"
               ? <button type="button" className="orch-primary" data-board-merge-outside-yes onClick={() => void check(waits.runId, true)}>{t(locale, "boardMergeOutsideYes")}</button>
               : <button type="button" className="orch-primary" data-board-merge-check onClick={() => void check(waits.runId, false)}>{t(locale, "boardMergeCheck")}</button>}
+            {!waits.source && TO_AGENT.has(waits.reason ?? "") && <button type="button" data-board-merge-agent
+              onClick={async () => { setAnswer(null); const r = await board.toAgent(waits.runId, language); const f = failure(r); say(f ?? t(locale, "boardMergeAgentStarted")); }}>
+              {t(locale, waits.agent ? "boardMergeAgentAgain" : "boardMergeAgent")}</button>}
             <button type="button" data-board-merge-skip onClick={async () => { setAnswer(null); const f = failure(await board.skip(waits.runId)); if (f) say(f); }}>{t(locale, "boardMergeSkip")}</button>
           </div>
         </div>

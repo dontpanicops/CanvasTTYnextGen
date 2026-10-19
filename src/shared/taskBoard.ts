@@ -79,6 +79,8 @@ export interface BoardMerge {
   task: { id: string; key: string; runId: string; commit: string };
   status: BoardMergeStatus;
   // paused: merge_conflict | merge_checks_failed | merge_prepare_failed | merge_prepare_changed | recovered;
+  // C3: merge_agent_failed (detail: limit:<kind> | replan | stopped | failed | markers | copy_changed | checks_after) |
+  // merge_waits_slot | merge_budget;
   // stopped: skipped | interrupted; failed: head_moved | error; completed: null | already (the result was in the head)
   reason: string | null;
   detail: string | null;
@@ -89,28 +91,34 @@ export interface BoardMerge {
   retrying: boolean; // the first checks failed; the retry waits for the project to be quiet
   dir: string | null; // the merge copy, where the person resolves
   createdAt: number;
+  // C3 (stage-c3-conflicts.md §2): the latest try of an agent — its resolution run; pending while the merge waits for it
+  agent?: { attempt: number; reason: "conflict" | "checks"; resolutionRunId: string; pending: boolean };
 }
 
 // A task's mark on the board (§4.4): its latest merge into the current head of its place — of its current run (a task
 // run again is a new result: an older merge says nothing of it)
 // already (decision 15): the result was in the head before, nothing was merged
-export type MergeMark = { kind: "in_board"; checks: boolean; already: boolean } | { kind: "merging" } | { kind: "not_merged"; reason: string; waits: boolean; runId: string } | null;
+export type MergeMark = { kind: "in_board"; checks: boolean; already: boolean } | { kind: "merging"; agent?: true } | { kind: "not_merged"; reason: string; waits: boolean; runId: string } | null;
 export const mergeOfTask = (head: Pick<BoardHead, "merges"> | null | undefined, taskId: string, runId?: string | null): BoardMerge | undefined =>
   head?.merges.find((x) => x.task.id === taskId && (runId === undefined || x.task.runId === runId));
 export function mergeMark(taskId: string, head: BoardHead | undefined, runId?: string | null): MergeMark {
   const m = mergeOfTask(head, taskId, runId);
   if (!m) return null;
   if (m.status === "completed") return { kind: "in_board", checks: m.completion === "confirmed", already: m.reason === "already" };
-  if (m.status === "preparing" || m.status === "running") return { kind: "merging" };
+  // C3: an agent resolves its conflict meanwhile
+  if (m.status === "preparing" || m.status === "running") return m.agent?.pending ? { kind: "merging", agent: true } : { kind: "merging" };
   return { kind: "not_merged", reason: m.reason ?? m.status, waits: m.status === "paused", runId: m.runId };
 }
 
 // B4 (§5.1): the board's autopilot of a link. on — never stored (a restart turns it off); the budget is board.json's;
 // used — the runs it started since it was turned on and their working minutes; stop — why it turned itself off last.
 // parallel (C1, §2.1): tasks at once, 1..4, in a separate copy only; absent: 2
-export interface AutopilotBudget { runs: number; minutes: number; parallel?: number }
+// conflicts (C3, stage-c3-conflicts.md §7.1): a merge conflict or its checks failing twice — handed to an agent or left
+// to the person; absent: to an agent
+export interface AutopilotBudget { runs: number; minutes: number; parallel?: number; conflicts?: "agent" | "person" }
 export const AUTOPILOT_BUDGET: AutopilotBudget = { runs: 5, minutes: 240 };
 export const AUTOPILOT_PARALLEL = 2;
+export const conflictsOf = (b: AutopilotBudget): "agent" | "person" => (b.conflicts === "person" ? "person" : "agent");
 export const parallelOf = (b: AutopilotBudget): number => (Number.isInteger(b.parallel) && b.parallel! >= 1 && b.parallel! <= 4 ? b.parallel! : AUTOPILOT_PARALLEL);
 export type AutopilotStopCode = "all_done" | "others_wait" | "budget_runs" | "budget_minutes" | "run_stopped" | "run_failed" | "limit_reached"
   | "run_paused" | "run_unreadable" | "settings_changed" | "grant_added" | "not_ready" | "take_failed" | "start_failed" | "worktree_base" | "link_gone" | "task_gone"
@@ -493,12 +501,18 @@ export function autopilotStep(board: Pick<Board, "tasks">, facts: readonly RunTa
 // - start: a free slot and a task without a reason (its dependencies, if any, in the head), from the head.
 // It waits while a run or a merge goes on or the person is asked; it is off, with a reason, when nothing goes on and
 // nothing waits for the person. started: the runs it started (stops of those decide); slots count every run of the place.
-export type AutopilotParallelStep = AutopilotStep | { kind: "head" } | { kind: "merge"; taskId: string; key: string; runId: string; commit: string };
+// C3 (stage-c3-conflicts.md §6, §9): agent — a paused merge handed to an agent (a slot and the budget for it);
+// merge_wait — no slot (it waits for one, not for the person) or no budget (then it is the person's)
+export type AutopilotParallelStep = AutopilotStep | { kind: "head" } | { kind: "merge"; taskId: string; key: string; runId: string; commit: string }
+  | { kind: "agent"; mergeRunId: string; key: string } | { kind: "merge_wait"; mergeRunId: string; why: "merge_waits_slot" | "merge_budget"; key: string };
+// what a merge is handed to an agent from by the autopilot: once, never after an agent's try (§2.3)
+const AGENT_FROM = new Set(["merge_conflict", "merge_checks_failed", "merge_waits_slot"]);
 const MERGE_ACTIVE = new Set(["preparing", "running"]);
 // C2: a worktree goes as a separate copy does — its own folder, from the head, merged into it
 export const isCopy = (mode: OrchestrationWorkMode | null | undefined): boolean => mode === "copy" || mode === "worktree";
+// refused (C3): merges the application would not hand to an agent (a lock file, not from the head, …): the person's
 export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], at: { workspaceId: string; project: string },
-  started: readonly string[], used: { runs: number; ms: number }, budget: AutopilotBudget, head: BoardHead | null): AutopilotParallelStep {
+  started: readonly string[], used: { runs: number; ms: number }, budget: AutopilotBudget, head: BoardHead | null, refused: ReadonlySet<string> = new Set()): AutopilotParallelStep {
   const statuses = boardStatuses(board, facts, head ? [head] : []);
   const place = board.tasks.filter((t) => t.workspaceId === at.workspaceId && t.project === at.project);
   const mergeOf = (taskId: string) => mergeOfTask(head, taskId, statuses.get(taskId)?.current ?? null);
@@ -529,7 +543,10 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   // the merges: one at a time; a paused one waits for the person, the head moved by someone else ends it
   const merges = head?.merges ?? [];
   const merging = merges.some((m) => MERGE_ACTIVE.has(m.status));
-  if (merges.some((m) => m.status === "paused")) person ??= "merge";
+  // C3: the paused merge the autopilot hands to an agent is not the person's (one at a time: one paused merge per head)
+  const handoff = conflictsOf(budget) === "agent"
+    ? merges.find((m) => m.status === "paused" && AGENT_FROM.has(m.reason ?? "") && !m.agent && !m.source && !refused.has(m.runId)) : undefined;
+  if (merges.some((m) => m.status === "paused" && m !== handoff)) person ??= "merge";
   // the head moved by someone else: only while that is the latest merge (a later one went on from the new value)
   const moved = merges[0]?.status === "failed" && merges[0].reason === "head_moved" ? merges[0] : undefined;
   if (moved) halt ??= { code: "head_moved", detail: moved.task.key, key: moved.task.key };
@@ -555,7 +572,15 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   // the slots: every run of the place that is not over (a pause holds its copy and may go on)
   const SLOT = new Set(["created", "preparing", "running", "pausing", "stopping", "paused"]);
   const busy = facts.filter((f) => place.some((t) => t.id === f.taskId) && (SLOT.has(f.status) || f.permission
-    || (f.status === "completed" && statuses.get(f.taskId!)?.reason === "no_checks" && statuses.get(f.taskId!)?.current === f.runId))).length;
+    || (f.status === "completed" && statuses.get(f.taskId!)?.reason === "no_checks" && statuses.get(f.taskId!)?.current === f.runId))).length
+    // C3: a merge waiting for its resolution run holds a slot (the run is not on the board's facts)
+    + merges.filter((m) => m.status === "running" && m.agent?.pending).length;
+  if (handoff && !moved) {
+    if (used.runs >= budget.runs) return { kind: "merge_wait", mergeRunId: handoff.runId, why: "merge_budget", key: handoff.task.key };
+    if (busy < parallelOf(budget)) return { kind: "agent", mergeRunId: handoff.runId, key: handoff.task.key };
+    if (handoff.reason !== "merge_waits_slot") return { kind: "merge_wait", mergeRunId: handoff.runId, why: "merge_waits_slot", key: handoff.task.key };
+    return { kind: "wait", why: "run" };
+  }
   // what goes on by itself: a run at work or waiting for the person's answer — a run paused for another reason (a bad
   // report, an external failure) holds its place but moves only by the person's «Продолжить»: no wait on it (§8)
   const moving = facts.some((f) => place.some((t) => t.id === f.taskId) && (ACTIVE.has(f.status) || f.permission || (f.status === "paused" && WAIT_PAUSES.has(f.reason ?? ""))));

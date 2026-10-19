@@ -632,6 +632,8 @@ export interface OrchestrationApi {
   boardMergeAll(workspaceId: string, project: string, language: "ru" | "en"): Promise<OrchestrationResult<{ tasks: string[] }>>;
   boardMergeResolve(runId: string, confirm: boolean): Promise<OrchestrationResult<{ result: "checking" } | { result: "unresolved" | "confirm"; files: string[] }>>;
   boardMergeSkip(runId: string): Promise<OrchestrationResult<void>>;
+  // C3: «Поручить агенту» — the paused merge handed to an agent; its resolution run
+  boardMergeAgent(runId: string, language: "ru" | "en"): Promise<OrchestrationResult<{ runId: string }>>;
   boardMergeOpen(runId: string): Promise<OrchestrationResult<null>>;
   // C2 (owner's decision 13): «update» — «Обновить итог от текущего HEAD» (a merge run, as a task's)
   boardHead(action: "branch" | "apply" | "new" | "update", workspaceId: string, project: string, language?: "ru" | "en"): Promise<OrchestrationResult<

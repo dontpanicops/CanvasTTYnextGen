@@ -22,7 +22,7 @@ import { neededSteps, worktreeSteps } from "./prepare.ts";
 import type { PrepareStep } from "./prepare.ts";
 import { runShell } from "./shellRun.ts";
 import {
-  BOARD_REF, WorkspaceError, advanceBoardRef, applyBoard, boardBranch, boardRefCommit, boardRefs, changedPaths, cloneDependencies, commitMerge, readDependencyRecord,
+  BOARD_REF, WorkspaceError, advanceBoardRef, applyBoard, applyTreeToCopy, commitSnapshot, publishRef, boardBranch, boardRefCommit, boardRefs, changedPaths, cloneDependencies, commitMerge, readDependencyRecord,
   behindBy, createWorkspace, diffPaths, isAncestor, mergeIntoCopy, onHeadLine, openBoardRepo, openWorkspace, projectBranch, projectHead, snapshotCopyTree, startBoardRef
 } from "./workspace.ts";
 import type { BoardRepo, Workspace } from "./workspace.ts";
@@ -52,12 +52,69 @@ interface Goal {
 const Q = (ws: string, project: string) => `${ws}\0${project}`;
 const OID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const MARKERS = /^(<{7}|>{7}) /m;
+// C3 (stage-c3-conflicts.md §6): lock files a copy with conflict markers could not install from — such a conflict is
+// the person's. ponytail: a fixed list of the usual package managers; a profile's own lock file is not looked up
+const LOCK_FILES = new Set(["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "composer.lock",
+  "Gemfile.lock", "Cargo.lock", "poetry.lock", "Pipfile.lock", "uv.lock", "go.sum", "mix.lock", "pubspec.lock"]);
+export const isLockFile = (p: string): boolean => LOCK_FILES.has(p.split("/").at(-1) ?? p);
+// what a merge may be handed to an agent from: a conflict, checks failed twice, an agent that failed, a wait for a slot
+const TO_AGENT = new Set(["merge_conflict", "merge_checks_failed", "merge_agent_failed", "merge_waits_slot", "merge_budget"]);
+type Agent = { attempt: number; reason: "conflict" | "checks"; resolutionRunId: string; base: string; tree: string; pending: boolean };
 
 class Refusal extends Error {
   readonly code: string;
   constructor(code: string, message: string) { super(message); this.code = code; }
 }
 const refuse = (code: string, message: string): never => { throw new Refusal(code, message); };
+
+// C3 (stage-c3-conflicts.md §3.1): the requirements a resolution keeps — the merged task's, then those of the tasks in the
+// head whose changes touch `paths` (oldest merge first), then the application's own about the markers; one text once;
+// 32 at most (a goal's limit): the application's always, the merged task's next, the rest while there is room. left:
+// the tasks none of whose requirements fit (named in the task text instead).
+export function mergeRequirements(task: { key: string; criteria: readonly string[] }, others: readonly { key: string; criteria: readonly string[]; paths: readonly string[] }[],
+  paths: readonly string[], conflict: boolean, language: "ru" | "en" = "ru"): { criteria: string[]; left: string[] } {
+  const app: string[] = [];
+  if (conflict) {
+    const head = language === "en" ? "No conflict markers in " : "В файлах нет маркеров конфликта: ";
+    let list = "";
+    for (const [i, p] of paths.entries()) {
+      const more = paths.length - i - 1;
+      const next = (list ? `${list}, ` : "") + p;
+      const tail = more ? (language === "en" ? ` and ${more} more (listed in the task)` : ` и ещё ${more} (список — в задании)`) : "";
+      if ((head + next + tail).length > 500) { list += language === "en" ? ` and ${paths.length - i} more (listed in the task)` : ` и ещё ${paths.length - i} (список — в задании)`; break; }
+      list = next;
+    }
+    app.push(head + list);
+  }
+  const out: string[] = [...app];
+  const add = (c: string) => { if (!out.includes(c) && out.length < 32) out.push(c); };
+  for (const c of task.criteria) add(c);
+  const touch = new Set(paths);
+  const left: string[] = [];
+  for (const o of others) {
+    if (!o.paths.some((p) => touch.has(p))) continue;
+    const before = out.length;
+    for (const c of o.criteria) add(c);
+    if (out.length === before && o.criteria.some((c) => !out.includes(c))) left.push(o.key);
+  }
+  return { criteria: out, left };
+}
+
+// C3 (§4): the markers' check of a resolution run — fails while a conflict file holds a marker line; a file that is gone
+// (a modify/delete conflict resolved by deleting) passes. Each line within 1000 characters; null: they do not fit `room`.
+export function markersLines(paths: readonly string[], room: number): string[] | null {
+  const q = (p: string) => `'${p.replace(/'/g, "'\\''")}'`;
+  const head = "! grep -sIE '^(<{7}|>{7}) ' --";
+  const lines: string[] = [];
+  let line = head;
+  for (const p of paths) {
+    if (head.length + 1 + q(p).length > 1000) return null;
+    if (line.length + 1 + q(p).length > 1000) { lines.push(line); line = head; }
+    line += ` ${q(p)}`;
+  }
+  if (line !== head) lines.push(line);
+  return lines.length <= room ? lines : null;
+}
 
 export function createBoardMerge(deps: BoardMergeDeps) {
   const queues = new Map<string, Promise<unknown>>();
@@ -124,15 +181,16 @@ export function createBoardMerge(deps: BoardMergeDeps) {
     goals.set(runId, g);
     return g;
   }
-  async function stateOf(runId: string): Promise<(BoardMerge & { goal: Goal; committed: string | null; auto: string | null }) | null> {
+  async function stateOf(runId: string): Promise<(BoardMerge & { goal: Goal; committed: string | null; auto: string | null; try: Agent | null }) | null> {
     const recs = await records(runId);
     if (!recs) return null;
     const goal = await goalOf(runId, recs);
     if (!goal) return null;
-    const s: BoardMerge & { goal: Goal; committed: string | null; auto: string | null } = {
+    const s: BoardMerge & { goal: Goal; committed: string | null; auto: string | null; try: Agent | null } = {
       runId, board: goal.merge.board, base: goal.merge.base, task: goal.merge.task, ...(goal.merge.source === "head" ? { source: "head" as const } : {}),
       status: "preparing", reason: null, detail: null,
-      completion: null, conflicts: [], outside: [], interference: false, retrying: false, dir: null, createdAt: goal.createdAt, goal, committed: null, auto: null
+      completion: null, conflicts: [], outside: [], interference: false, retrying: false, dir: null, createdAt: goal.createdAt, goal, committed: null, auto: null,
+      try: null
     };
     for (const r of recs) {
       const d = r.data as Record<string, unknown>;
@@ -147,13 +205,22 @@ export function createBoardMerge(deps: BoardMergeDeps) {
         s.conflicts = Array.isArray(d.conflicts) ? d.conflicts.filter((x): x is string => typeof x === "string") : [];
         s.auto = typeof d.auto === "string" ? d.auto : null;
         s.dir = typeof d.dir === "string" ? d.dir : null;
-      } else if (type === "merge.resolved") s.outside = Array.isArray(d.outside) ? d.outside.filter((x): x is string => typeof x === "string") : [];
+      } else if (type === "merge.resolved") {
+        s.outside = Array.isArray(d.outside) ? d.outside.filter((x): x is string => typeof x === "string") : [];
+        if (s.try) s.try.pending = false; // resolved — by the agent's run or by the person
+      } else if (type === "merge.agent") {
+        s.try = { attempt: Number(d.attempt) || 1, reason: d.reason === "checks" ? "checks" : "conflict", resolutionRunId: String(d.resolutionRunId),
+          base: String(d.base), tree: String(d.tree), pending: true };
+      }
       else if (type === "merge.committed") s.committed = typeof d.commit === "string" ? d.commit : null;
       // the first checks failed, the retry waits for the project to be quiet: no new task starts meanwhile (§2.3)
       if (type === "merge.checked") s.retrying = d.attempt === 1 && d.passed === false;
       else if (type === "run.status" || type === "merge.resolved") s.retrying = false;
     }
     if (s.status !== "running") s.retrying = false;
+    // the agent's try ends with the merge's own pause or end, too (it failed, or the person took over)
+    if (s.try && s.status !== "running") s.try.pending = false;
+    if (s.try) s.agent = { attempt: s.try.attempt, reason: s.try.reason, resolutionRunId: s.try.resolutionRunId, pending: s.try.pending };
     return s;
   }
   async function all(): Promise<NonNullable<Awaited<ReturnType<typeof stateOf>>>[]> {
@@ -176,6 +243,8 @@ export function createBoardMerge(deps: BoardMergeDeps) {
     for (const s of await all()) {
       if (s.status !== "preparing" && s.status !== "running") continue;
       if (working.has(s.runId)) continue;
+      // C3: a merge waiting for its resolution run waits on, whatever process started it (stage-c3-conflicts.md §2.3)
+      if (s.try?.pending) continue;
       await inQueue(Q(s.goal.workspaceId, s.goal.project), async () => {
         const now = await withRepo(s.goal.project, (r) => boardRefCommit(r, s.board)).catch(() => null);
         if (s.committed && now === s.committed) {
@@ -237,7 +306,7 @@ export function createBoardMerge(deps: BoardMergeDeps) {
   }
 
   // the checks (one retry when no run of the project is in a turn, at most after retryWaitMs), the commit, the head
-  async function finish(runId: string, ws: Workspace, g: Goal, tree: string): Promise<void> {
+  async function finish(runId: string, ws: Workspace, g: Goal, tree: string, afterAgent = false): Promise<void> {
     // the settings removed while the merge waited for the person: it waits again, never moves the head unchecked
     if (await deps.checks(g.project) === null) return status(runId, "paused", "merge_no_settings");
     // the dependencies of the merged code (its lock files are the merged ones): cloned from the project, else prepared
@@ -252,7 +321,9 @@ export function createBoardMerge(deps: BoardMergeDeps) {
       const until = Date.now() + (deps.retryWaitMs ?? 10 * 60_000);
       while (Date.now() < until && !(await deps.quiet(g.project).catch(() => true))) await new Promise((r) => setTimeout(r, deps.retryPollMs ?? 5000));
       passed = await runChecks(runId, ws, g.project, tree, 2);
-      if (passed === false) return status(runId, "paused", "merge_checks_failed", { interference: true });
+      // C3: after an agent's resolution the checks failing again are not handed to an agent once more (§2.3)
+      if (passed === false) return afterAgent ? status(runId, "paused", "merge_agent_failed", { detail: "checks_after", interference: true })
+        : status(runId, "paused", "merge_checks_failed", { interference: true });
     }
     const commit = await commitMerge(ws, tree, [g.merge.base, g.merge.task.commit], g.merge.source === "head"
       ? `Raoden Loom: update the board's result from HEAD\n\nRaoden-Merge: ${runId}\nRaoden-Head: ${g.merge.task.commit}\n`
@@ -369,7 +440,7 @@ export function createBoardMerge(deps: BoardMergeDeps) {
           return { behind: on ? await behindBy(r, h.commit, now!) : null, branch: await projectBranch(r), otherLine: !!now && !on };
         }).catch(() => ({ behind: null, branch: null, otherLine: false }));
         out.push({ workspaceId: p.workspaceId, project: p.project, ref: h.ref, n: h.n, commit: h.commit, behind, branch, ...(otherLine ? { otherLine } : {}),
-          merges: merges.filter((m) => m.board === h.ref && m.goal.project === p.project).map(({ goal: _g, committed: _c, auto: _a, ...m }) => m) });
+          merges: merges.filter((m) => m.board === h.ref && m.goal.project === p.project).map(({ goal: _g, committed: _c, auto: _a, try: _t, ...m }) => m) });
       }
       return out;
     },
@@ -417,6 +488,81 @@ export function createBoardMerge(deps: BoardMergeDeps) {
         return { result: "checking" as const };
       });
     },
+
+    // C3 (stage-c3-conflicts.md §2.1): the merge handed to an agent. The copy as it is — with the conflict's markers, or
+    // the automatic merge whose checks failed — becomes a commit on the expected head, published in the project
+    // (refs/canvastty/<merge run>/conflict-<attempt>); the resolution run (resolutionRunId, started by the caller next)
+    // starts its copy from it. The merge stays «running» until resolutionEnded.
+    toAgent: async (runId: string, resolutionRunId: string): Promise<{ base: string; tree: string; attempt: number; reason: "conflict" | "checks"; conflicts: string[]; first: string; project: string; goal: Goal }> => {
+      const s = await stateOf(runId) ?? refuse("run_not_found", "no such merge run");
+      return inQueue(Q(s.goal.workspaceId, s.goal.project), async () => {
+        const now = await stateOf(runId) ?? refuse("run_not_found", "no such merge run");
+        if (now.status !== "paused" || !TO_AGENT.has(now.reason ?? "") || !now.auto) refuse("merge_not_paused", "the merge does not wait for an agent or the person");
+        if (now.goal.merge.source === "head") refuse("merge_agent_unavailable", "an update from HEAD is the person's");
+        const locks = now.conflicts.filter(isLockFile);
+        if (locks.length) refuse("merge_agent_unavailable", `a conflict in a lock file: ${locks.join(", ")}`);
+        const ws = await openWorkspace({ root: deps.root, runId, gitPath: deps.gitPath() });
+        const tree = await snapshotCopyTree(ws, ws.baseline.tree);
+        const attempt = (now.try?.attempt ?? 0) + 1;
+        const reason = now.conflicts.length || now.reason === "merge_conflict" || now.try?.reason === "conflict" ? "conflict" as const : "checks" as const;
+        const base = await commitSnapshot(ws, tree, now.goal.merge.base, `Raoden Loom: ${now.task.key} — the merge as handed to an agent (${attempt})\n\nRaoden-Merge: ${runId}\n`);
+        await publishRef(ws, `conflict-${attempt}`, base);
+        await append(runId, "merge.agent", { attempt, reason, resolutionRunId, base, tree });
+        await status(runId, "running");
+        // the first try's commit is the automatic merge itself: what the reviewer's diff is against, in every try (§4)
+        const first = attempt === 1 ? base : (await records(runId) ?? []).map((r) => r.data as { attempt?: unknown; base?: unknown })
+          .find((d) => d.attempt === 1 && typeof d.base === "string")?.base as string ?? base;
+        return { base, tree, attempt, reason, conflicts: now.conflicts, first, project: now.goal.project, goal: now.goal };
+      });
+    },
+    // C3 (§6): no slot for the agent now — the merge waits for one; the budget is spent — it waits for the person
+    waitFor: async (runId: string, why: "merge_waits_slot" | "merge_budget"): Promise<void> => {
+      const s = await stateOf(runId) ?? refuse("run_not_found", "no such merge run");
+      await inQueue(Q(s.goal.workspaceId, s.goal.project), async () => {
+        const now = await stateOf(runId) ?? refuse("run_not_found", "no such merge run");
+        if (now.status !== "paused" || !TO_AGENT.has(now.reason ?? "")) refuse("merge_not_paused", "the merge does not wait");
+        if (now.reason !== why) await status(runId, "paused", why);
+      });
+    },
+    // C3 (§2.3, §5): the resolution run ended. completed: its tree (the last checkpoint's) goes into the merge copy, the
+    // mechanical condition, then the merge's own checks, commit and head, as after the person's «Готово, проверить».
+    // failed: the merge waits for the person with why. A run that is not the merge's pending one is ignored.
+    resolutionEnded: async (runId: string, resolutionRunId: string, outcome: { kind: "completed"; tree: string } | { kind: "failed"; detail: string }): Promise<"applied" | "failed" | "ignored"> => {
+      const s = await stateOf(runId);
+      if (!s) return "ignored";
+      return inQueue(Q(s.goal.workspaceId, s.goal.project), async () => {
+        const now = await stateOf(runId);
+        if (now?.status !== "running" || !now.try?.pending || now.try.resolutionRunId !== resolutionRunId) return "ignored" as const;
+        if (outcome.kind === "failed") { await status(runId, "paused", "merge_agent_failed", { detail: outcome.detail.slice(0, 200) }); return "failed" as const; }
+        const ws = await openWorkspace({ root: deps.root, runId, gitPath: deps.gitPath() });
+        try {
+          await applyTreeToCopy(ws, now.try.tree, outcome.tree);
+        } catch (error) {
+          const code = error instanceof WorkspaceError ? error.code : "error";
+          await status(runId, "paused", "merge_agent_failed", { detail: code === "restore_state_changed" || code === "restore_conflict" ? "copy_changed" : `copy_changed: ${code}` });
+          return "failed" as const;
+        }
+        const tree = await snapshotCopyTree(ws, ws.baseline.tree);
+        if (tree !== outcome.tree) { await status(runId, "paused", "merge_agent_failed", { detail: "copy_changed" }); return "failed" as const; }
+        for (const f of now.conflicts) {
+          if (MARKERS.test(await readFile(join(ws.repo, f), "utf8").catch(() => ""))) { await status(runId, "paused", "merge_agent_failed", { detail: "markers" }); return "failed" as const; }
+        }
+        const changed = await diffPaths(ws, now.auto!, tree);
+        const outside = [...changed.filter((p) => !now.conflicts.includes(p)), ...now.conflicts.filter((p) => !changed.includes(p))];
+        await append(runId, "merge.resolved", { by: "executor", tree, outside, resolutionRunId });
+        working.add(runId);
+        void (async () => {
+          try { await finish(runId, ws, now.goal, tree, true); } catch (error) {
+            await status(runId, "failed", "error", { detail: String((error as Error)?.message ?? error).slice(0, 500) }).catch(() => {});
+          } finally { working.delete(runId); }
+        })();
+        return "applied" as const;
+      });
+    },
+    // the merges whose resolution run is awaited (the caller watches those runs)
+    awaiting: async (): Promise<{ runId: string; resolutionRunId: string }[]> =>
+      (await all()).filter((m) => m.status === "running" && m.try?.pending).map((m) => ({ runId: m.runId, resolutionRunId: m.try!.resolutionRunId })),
+    state: async (runId: string) => stateOf(runId),
 
     // «Пропустить»: the task stays «Done», not in the head; its copy stays for a look
     skip: async (runId: string): Promise<void> => {
