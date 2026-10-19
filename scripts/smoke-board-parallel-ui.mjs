@@ -6,6 +6,7 @@
 //   3. the first «Done» goes into the board's result with its checks; the second conflicts: the merge waits for the
 //      person, the board names the file and nothing moves; resolved in the merge copy, «Done, check» — both in the
 //      result, checks passed;
+//      (C3: with «Конфликты: решать мне» chosen in the autopilot's window — an agent's way is smoke-board-c3-ui);
 //   4. «Create a branch from the board's result»: a new name at the result; the project folder, its HEAD and status
 //      as they were.
 // Needs `npm run build` first. Starts no real model. Usage: node scripts/smoke-board-parallel-ui.mjs [--shots <dir>]
@@ -107,10 +108,16 @@ try {
   await app.waitFor(`${q("[data-board-autopilot-confirm]")} && true`, "the autopilot's explanation");
   const parallel = await app.ev(`${q("[data-board-budget-parallel]")}?.value ?? null`);
   expect(parallel === "2", "«Run the board» offers 2 tasks at once by default", parallel);
+  // C3: a conflict goes to an agent by default; this smoke is about the person's way — «Конфликты: решать мне»
+  const conflictsDefault = await app.ev(`${q("[data-board-budget-conflicts]")}?.value ?? null`);
+  expect(conflictsDefault === "agent", "«Конфликты» offers «hand to an agent» by default", conflictsDefault);
+  await app.ev(`(() => { const s = ${q("[data-board-budget-conflicts]")}; const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+    set.call(s, "person"); s.dispatchEvent(new Event("change", { bubbles: true })); return s.value; })()`);
   await boardShot("par-01-autopilot-ask-board");
   await app.clickEl(q("[data-board-autopilot-yes]"));
   await app.waitFor(`${q('[data-board-autopilot="on"]')} && true`, "the autopilot on");
   expect((await app.ev(`${q("[data-board-autopilot-parallel]")}?.textContent`)) === "2 параллельно", "the autopilot says «2 at once»");
+  expect((await app.ev(`${q("[data-board-autopilot-conflicts]")}?.dataset.boardAutopilotConflicts`)) === "person", "the autopilot says «Конфликты: решать мне»");
   const both = await waitForValue(async () => {
     const v = await view();
     const live = v.facts.filter((f) => ["preparing", "running", "paused"].includes(f.status));

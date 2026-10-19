@@ -98,14 +98,15 @@ export interface BoardMerge {
 // A task's mark on the board (§4.4): its latest merge into the current head of its place — of its current run (a task
 // run again is a new result: an older merge says nothing of it)
 // already (decision 15): the result was in the head before, nothing was merged
-export type MergeMark = { kind: "in_board"; checks: boolean; already: boolean } | { kind: "merging" } | { kind: "not_merged"; reason: string; waits: boolean; runId: string } | null;
+export type MergeMark = { kind: "in_board"; checks: boolean; already: boolean } | { kind: "merging"; agent?: true } | { kind: "not_merged"; reason: string; waits: boolean; runId: string } | null;
 export const mergeOfTask = (head: Pick<BoardHead, "merges"> | null | undefined, taskId: string, runId?: string | null): BoardMerge | undefined =>
   head?.merges.find((x) => x.task.id === taskId && (runId === undefined || x.task.runId === runId));
 export function mergeMark(taskId: string, head: BoardHead | undefined, runId?: string | null): MergeMark {
   const m = mergeOfTask(head, taskId, runId);
   if (!m) return null;
   if (m.status === "completed") return { kind: "in_board", checks: m.completion === "confirmed", already: m.reason === "already" };
-  if (m.status === "preparing" || m.status === "running") return { kind: "merging" };
+  // C3: an agent resolves its conflict meanwhile
+  if (m.status === "preparing" || m.status === "running") return m.agent?.pending ? { kind: "merging", agent: true } : { kind: "merging" };
   return { kind: "not_merged", reason: m.reason ?? m.status, waits: m.status === "paused", runId: m.runId };
 }
 

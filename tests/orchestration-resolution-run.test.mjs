@@ -142,7 +142,7 @@ test("the reviewer asks for a new plan: no lead to make it — paused at the lim
   const runId = randomUUID();
   assert.ok((await m.create({ requestId: runId, source: dir, goal: goal(commit) })).ok);
   const v = await ended(m, runId);
-  assert.deepEqual([v.status, v.reason], ["paused", "limit_reached"], JSON.stringify(v).slice(0, 500));
+  assert.deepEqual([v.status, v.reason, v.progress?.budget?.reached], ["paused", "limit_reached", "replans"], JSON.stringify({ roles: roles(journal(root, runId).parsed.state), budget: v.progress?.budget }));
   assert.ok(!roles(journal(root, runId).parsed.state).includes("lead"));
   await m.shutdown();
 });

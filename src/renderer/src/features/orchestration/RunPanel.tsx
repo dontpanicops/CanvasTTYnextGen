@@ -1537,7 +1537,7 @@ function CurrentRunPanel({ orch, runId, locale, panel, onClose, onNewGoal, onVie
   const wide = panel.tab === "summary" || panel.tab === "plan" || panel.tab === "result";
   return (
     <aside className={`orch-panel${wide ? " orch-panel--wide" : ""}${expanded ? " orch-panel--full" : ""}`}
-      data-interactive="true" data-wheel-owner="local" data-canvas-wheel-priority="local" aria-label={t(locale, "orchRun")} data-orch-panel-tab={panel.tab}>
+      data-interactive="true" data-wheel-owner="local" data-canvas-wheel-priority="local" aria-label={t(locale, "orchRun")} data-orch-panel-tab={panel.tab} data-orch-run-id={runId ?? undefined}>
       <header className="orch-panel__header">
         <strong>{t(locale, "orchRun")}</strong>
         {runId && <code title={runId}>{runId.slice(0, 8)}</code>}

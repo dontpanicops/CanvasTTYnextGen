@@ -2825,7 +2825,9 @@ export function budgetOf(st: RunState, goal: Goal, now = Date.now()): RunBudget 
   const used = Object.keys(st.turns).length;
   const replans = Math.max(0, (st.orch.plan?.version ?? 0) - 1);
   const reached = st.status !== "paused" || st.pausedReason !== "limit_reached" ? null
-    : now - goal.createdAt >= limits.runMs ? "runMs" : used >= limits.turns ? "turns" : (st.orch.plan?.version ?? 0) > limits.replans ? "replans" : "roundsPerStage";
+    : now - goal.createdAt >= limits.runMs ? "runMs" : used >= limits.turns ? "turns"
+      // C3: the application's plan has no lead to plan again — a replan asked for is its limit (cycle.ts, replan())
+      : (st.orch.plan?.version ?? 0) > limits.replans || (st.orch.plan?.turnId === null && st.orch.reviews.at(-1)?.verdict === "replan") ? "replans" : "roundsPerStage";
   return {
     calls, startedAt: goal.createdAt, deadlineAt: goal.createdAt + limits.runMs, reached,
     limits: { turns: limits.turns, runMs: limits.runMs, replans: limits.replans, roundsPerStage: limits.roundsPerStage },
