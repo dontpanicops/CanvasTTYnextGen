@@ -416,10 +416,12 @@ export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager
   }, manager.boardAutopilot));
   handleMain(IPC.orchestrationBoardBudget, (_e, linkId: unknown, budget: unknown) => checked(() => {
     if (budget === null) return [uuid(linkId, "linkId"), null] as [string, null];
-    const o = obj(budget, "budget", ["runs", "minutes"], ["parallel"]);
+    const o = obj(budget, "budget", ["runs", "minutes"], ["parallel", "conflicts"]);
+    if (o.conflicts !== undefined && o.conflicts !== "agent" && o.conflicts !== "person") bad("budget.conflicts must be agent or person");
     const int = (v: unknown, what: string, max: number) => (Number.isInteger(v) && (v as number) >= 1 && (v as number) <= max ? v as number : bad(`${what} must be 1..${max}`));
     return [uuid(linkId, "linkId"), { runs: int(o.runs, "budget.runs", 100), minutes: int(o.minutes, "budget.minutes", 1440),
-      ...(o.parallel !== undefined ? { parallel: int(o.parallel, "budget.parallel", 4) } : {}) }] as [string, AutopilotBudget];
+      ...(o.parallel !== undefined ? { parallel: int(o.parallel, "budget.parallel", 4) } : {}),
+      ...(o.conflicts !== undefined ? { conflicts: o.conflicts as "agent" | "person" } : {}) }] as [string, AutopilotBudget];
   }, manager.boardBudget));
   // C1 (stage-c-parallel.md §4): merges into the board's merged head and the person's actions on it
   const lang = (v: unknown) => (v === "ru" || v === "en" ? v : bad("language must be ru or en"));

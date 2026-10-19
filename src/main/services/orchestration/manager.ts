@@ -1572,6 +1572,9 @@ export function createRunManager(deps: RunManagerDeps) {
     head: async (workspaceId, project) => (await merges.heads([{ workspaceId, project }]))[0] ?? null,
     ensureHead: async (workspaceId, project) => { await merges.ensureHead(workspaceId, project); },
     merge: (input) => result(() => merges.merge(input)),
+    // C3: «Поручить агенту» by the autopilot, and the merge's wait for a slot or the person
+    toAgent: (mergeRunId, language) => result(() => startResolution(mergeRunId, language)),
+    mergeWait: (mergeRunId, why) => result(() => merges.waitFor(mergeRunId, why)),
     newId: () => randomUUID(),
     now: () => Date.now()
   }, async (linkId) => (await board.read()).board.autopilot?.[linkId] ?? AUTOPILOT_BUDGET);

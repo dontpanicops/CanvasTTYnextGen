@@ -16,7 +16,7 @@ import { createBoardMerge, isLockFile, markersLines, mergeRequirements } from ".
 import { isResolutionJournal } from "../src/main/services/orchestration/journal.ts";
 import { createRunManager, testNativeRuntime } from "../src/main/services/orchestration/manager.ts";
 import { createProfileStore, suggestProfile } from "../src/main/services/orchestration/profile.ts";
-import { AUTOPILOT_BUDGET } from "../src/shared/taskBoard.ts";
+import { AUTOPILOT_BUDGET, autopilotParallelStep } from "../src/shared/taskBoard.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GIT = findGit(process.env);
@@ -338,5 +338,72 @@ test("through the manager: two tasks change one line, the second's merge conflic
   assert.equal(goal.resolution.mergeRunId, paused.runId);
   await m.boardAutopilot(linkId, false, "ru");
   assert.deepEqual(personSide(src), side, "the person's folder untouched");
+  await m.shutdown();
+});
+
+test("the autopilot's step (§9): a paused conflict to an agent with a slot and budget; no slot — it waits for one, not the person; no budget, «Решать мне», a second try, a refusal — the person's", () => {
+  const at = { workspaceId: WS, project: "/p" };
+  const merge = (extra) => ({ runId: randomUUID(), board: "refs/raoden/board/common/1", base: "b".repeat(40), task: { id: randomUUID(), key: "T-2", runId: randomUUID(), commit: "c".repeat(40) },
+    status: "paused", reason: "merge_conflict", detail: null, completion: null, conflicts: ["a.txt"], outside: [], interference: false, retrying: false, dir: null, createdAt: 1, ...extra });
+  const head = (merges) => ({ workspaceId: WS, project: "/p", ref: "refs/raoden/board/common/1", n: 1, commit: "b".repeat(40), behind: null, branch: null, merges });
+  const step = (merges, budget = { runs: 5, minutes: 240 }, used = { runs: 0, ms: 0 }, refused) => autopilotParallelStep({ tasks: [] }, [], at, [], used, budget, head(merges), refused);
+  const m = merge();
+  assert.deepEqual(step([m]), { kind: "agent", mergeRunId: m.runId, key: "T-2" });
+  assert.deepEqual(step([merge({ reason: "merge_checks_failed", conflicts: [] })]).kind, "agent");
+  // no slot: parallel 1 held by another merge's resolution run
+  const busy = merge({ status: "running", reason: null, agent: { attempt: 1, reason: "conflict", resolutionRunId: randomUUID(), pending: true } });
+  assert.deepEqual(step([m, busy], { runs: 5, minutes: 240, parallel: 1 }), { kind: "merge_wait", mergeRunId: m.runId, why: "merge_waits_slot", key: "T-2" });
+  assert.deepEqual(step([merge({ reason: "merge_waits_slot" }), busy], { runs: 5, minutes: 240, parallel: 1 }), { kind: "wait", why: "run" }, "a wait for a slot is not the person's");
+  // no budget
+  assert.equal(step([m], { runs: 2, minutes: 240 }, { runs: 2, ms: 0 }).why, "merge_budget");
+  // the person's
+  assert.deepEqual(step([m], { runs: 5, minutes: 240, conflicts: "person" }), { kind: "wait", why: "merge" });
+  assert.deepEqual(step([merge({ reason: "merge_agent_failed", agent: { attempt: 1, reason: "conflict", resolutionRunId: randomUUID(), pending: false } })]), { kind: "wait", why: "merge" });
+  assert.deepEqual(step([merge({ agent: { attempt: 1, reason: "conflict", resolutionRunId: randomUUID(), pending: false } })]), { kind: "wait", why: "merge" }, "never a second try by itself");
+  assert.deepEqual(step([m], undefined, undefined, new Set([m.runId])), { kind: "wait", why: "merge" });
+  assert.deepEqual(step([merge({ source: "head" })]), { kind: "wait", why: "merge" });
+  assert.deepEqual(step([merge({ reason: "merge_budget" })]), { kind: "wait", why: "merge" });
+});
+
+test("through the manager with the autopilot: the conflict handed to an agent by itself, the merge completes, the autopilot ends «all done»; its budget counts the resolution run", OPTS, async () => {
+  const src = fs.realpathSync(project());
+  const m = manager(scripts(taskTurns("one\n"), taskTurns("two\n"), resolutionTurns), { MOCK_TURN_DELAY_MS: "300" });
+  await createProfileStore(m.root).save(src, { ...(await suggestProfile(src)), workMode: "copy", checks: ["test -f keep.txt"] });
+  const input = (title) => ({ workspaceId: WS, project: src, title, text: "write c.txt", criteria: ["c.txt is written"], dependsOn: [] });
+  await m.boardCreate(input("A"));
+  await m.boardCreate(input("B"));
+  const side = personSide(src);
+  const linkId = await linkOn(m, src);
+  assert.equal((await m.boardBudget(linkId, { ...AUTOPILOT_BUDGET, parallel: 2 })).ok, true);
+  assert.ok((await m.boardAutopilot(linkId, true, "ru")).ok);
+  let most = 0;
+  const end = await until(async () => { const s = (await m.board()).value.autopilot[linkId]; if (s?.on) most = Math.max(most, s.used.runs); return s && !s.on ? s : null; }, 200_000);
+  assert.equal(end.stop.code, "all_done", JSON.stringify(end));
+  assert.equal(most, 3, "two tasks and the resolution run");
+  const h = (await m.board()).value.heads[0];
+  const agentMerge = h.merges.find((x) => x.agent);
+  assert.deepEqual([agentMerge.status, agentMerge.completion, agentMerge.agent.attempt], ["completed", "confirmed", 1]);
+  assert.equal(g(src, "show", `${h.commit}:c.txt`), "one\ntwo");
+  assert.deepEqual(personSide(src), side);
+  await m.shutdown();
+});
+
+test("«Решать мне»: the conflict waits for the person, nothing is handed to an agent; the setting survives a budget change", OPTS, async () => {
+  const src = fs.realpathSync(project());
+  const m = manager(scripts(taskTurns("one\n"), taskTurns("two\n")), { MOCK_TURN_DELAY_MS: "300" });
+  await createProfileStore(m.root).save(src, { ...(await suggestProfile(src)), workMode: "copy", checks: ["test -f keep.txt"] });
+  const input = (title) => ({ workspaceId: WS, project: src, title, text: "write c.txt", criteria: ["c.txt is written"], dependsOn: [] });
+  await m.boardCreate(input("A"));
+  await m.boardCreate(input("B"));
+  const linkId = await linkOn(m, src);
+  assert.equal((await m.boardBudget(linkId, { ...AUTOPILOT_BUDGET, parallel: 2, conflicts: "person" })).ok, true);
+  assert.equal((await m.board()).value.board.autopilot[linkId].conflicts, "person");
+  assert.ok((await m.boardAutopilot(linkId, true, "ru")).ok);
+  const paused = await until(async () => (await m.board()).value.heads?.[0]?.merges.find((x) => x.status === "paused"), 120_000);
+  await sleep(3500); // a few beats of the autopilot
+  const again = (await m.board()).value;
+  assert.deepEqual([again.heads[0].merges.find((x) => x.runId === paused.runId).reason, again.autopilot[linkId].waits], ["merge_conflict", "merge"]);
+  assert.ok(!again.heads[0].merges.some((x) => x.agent));
+  await m.boardAutopilot(linkId, false, "ru");
   await m.shutdown();
 });
