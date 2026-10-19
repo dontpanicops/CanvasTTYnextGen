@@ -480,3 +480,29 @@ JSON-схема хода `decompose`:
 - 3 подзадачи по 4 хода (план, исполнение, проверка, финальная проверка): 12;
 - завершающий запуск: 4;
 - итого около 18, остальное — запас на отказ, повтор и замечание проверяющего.
+
+## 13. Как сделано
+
+### E1 — журнал и запуск разбиения
+
+- Цель: `Goal.decomposition {taskId, key, base}`, проверка `checkDecomposition` рядом с `checkResolution`. Кроме §3.1
+  отвергаются `prepare` и `finish`; `commands` обязаны быть заданы и пусты. `resolution` и `decomposition` исключают
+  друг друга. По IPC поле не приходит: `parseGoal` берёт только известные ключи. Старт из доски (E2) передаёт
+  `commands: []` явно и не задаёт `mode`, иначе профиль добавит команды или подготовку.
+- Журнал: тот же конверт v3, что у разрешения C3 (`minReaderVersion` 3, правила v2), `run.created` с `kind:
+  "decomposition"`; `isDecompositionJournal` рядом с `isResolutionJournal`; `RunState.kind`. В журнале разбиения
+  допустимы только ходы `decompose`, а ход `decompose` — только в нём; план в нём — конфликт.
+- **Отступление от §3.2:** кроме `decomposition.proposed` и `decomposition.rejected` есть третья запись
+  `decomposition.whole {turnId, why}`. Без неё чистый цикл не видит ответа «выполнять целиком». Каждая запись — ответ
+  последнего завершённого хода `decompose`, одна на ход.
+- `run.status` v3 принимает `completion.kind` `proposed` / `whole` / `rejected`. `completedAllowed` для журнала
+  разбиения — своя ветка: вид завершения должен совпадать с ответом последнего хода (`rejected` — не меньше двух
+  отказов). Правило «`no_checks` ⇔ ноль команд» в `textsConflict` к нему не применяется. В обычном журнале разрешения
+  эти виды отвергаются при воспроизведении.
+- Цикл: ветка разбиения в `decide()` сразу после паузы вопроса; `proposesChecks` для неё ложно; `completion()` не
+  вызывается — `complete()` пишет основание `{kind, turnId, ref}`.
+- Ход: роль всегда лид; схема `decompose` в подмножестве без `pattern` и `minItems`, поэтому id подзадач — перечень
+  S1..S10, а «хотя бы один критерий» и «ровно одно из tasks / whole / question» проверяют `reportProblem` и
+  `splitViolations` (§4). Отказ возвращает причины лиду в следующем ходе.
+- Факты задачи доски (`completion`) по-прежнему только `confirmed` / `no_checks`: запуск разбиения не запуск задачи.
+- Тесты: `tests/orchestration-journal-split.test.mjs` (7), `tests/orchestration-split-run.test.mjs` (11).

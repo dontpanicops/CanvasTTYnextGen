@@ -103,7 +103,10 @@ export type EventType =
   | "review.discarded"
   | "plan.proposed" // A4
   | "plan.decided"
-  | "person.decided";
+  | "person.decided"
+  | "decomposition.proposed" // E1
+  | "decomposition.rejected"
+  | "decomposition.whole";
 
 export const STAGE13_EVENTS = ["prepare.started", "prepare.finished", "check.classified", "permission.granted",
   "permission.applied", "finish.intent", "finish.result"] as const;
@@ -111,6 +114,9 @@ export type Stage13Event = (typeof STAGE13_EVENTS)[number];
 export const V2_EVENTS = ["checks.proposed", "checks.decided", "finish.confirmed", "checks.amended", "review.assessed", "review.discarded",
   "plan.proposed", "plan.decided", "person.decided"] as const;
 export type V2Event = (typeof V2_EVENTS)[number];
+// E1 (stage-e-decomposition.md §3.2): the lead's answer to a decompose turn, in a decomposition journal only
+export const SPLIT_EVENTS = ["decomposition.proposed", "decomposition.rejected", "decomposition.whole"] as const;
+export type SplitEvent = (typeof SPLIT_EVENTS)[number];
 
 export type CommandResult = { status: "accepted" | "rejected"; code: string | null };
 
@@ -192,11 +198,12 @@ export interface CheckState {
   durationMs: number | null;
 }
 
-export type CompletionKind = "confirmed" | "no_checks";
+export type CompletionKind = "confirmed" | "no_checks" | "proposed" | "whole" | "rejected"; // the last three: a decomposition run (E1)
 export interface RunState {
   runId: string;
   version: 1 | 2; // the rules it is replayed by: the first record's v (journal-v2-format.md §1); 2 for a resolution run
   envelope?: 3; // C3: the v each line carries when it is not `version` (a resolution run's journal)
+  kind?: "resolution" | "decomposition"; // C3, E1: run.created's kind of a journal v3
   preview: boolean; // v2 written by a development build of A1–A3 (formatPreview)
   completion: { kind: CompletionKind; basis: TextRef } | null; // v2: the completed status' result of the completion function
   status: RunStatus;
@@ -212,7 +219,7 @@ export interface RunState {
 }
 
 // Orchestration events (stage-5-contract.md §8): the data of each event exactly as written to the journal.
-export type TurnPurpose = "plan" | "execute" | "review" | "final_review";
+export type TurnPurpose = "plan" | "execute" | "review" | "final_review" | "decompose"; // decompose: E1, a decomposition run only
 export type LimitKind = "turns" | "roundsPerStage" | "replans" | "runMs";
 export type ReviewVerdict = "accept" | "fix" | "replan" | "question" | "complete";
 export type RecoveryAction = "accept" | "retry_turn" | "reset_to_checkpoint";
@@ -330,7 +337,10 @@ export interface OrchState {
   proposals: ProposalState[];
   person: PersonDecision[];
   decidedCommands: string[];
+  // E1 (stage-e-decomposition.md §3.2): a decomposition run's answers of the lead, each of its decompose turn
+  split: { proposed: SplitAnswer | null; whole: SplitAnswer | null; rejected: SplitAnswer[] };
 }
+export interface SplitAnswer { turnId: string; ref: TextRef; seq: number }
 export type SandboxNetwork = "denied" | "open";
 export type FinishDecision = "confirm" | "decline";
 export interface FinishConfirmation { commandId: string; tree: string; commit: string | null; push: FinishDecision | null; qa: FinishDecision | null; seq: number }
@@ -392,7 +402,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 const isInt = (v: unknown): v is number => Number.isSafeInteger(v);
 const isPos = (v: unknown): v is number => isInt(v) && v >= 1;
 const isNonNeg = (v: unknown): v is number => isInt(v) && v >= 0;
-const TURN_PURPOSES: readonly string[] = ["plan", "execute", "review", "final_review"];
+const TURN_PURPOSES: readonly string[] = ["plan", "execute", "review", "final_review", "decompose"];
 const STAGE_VERDICTS: readonly string[] = ["accept", "fix", "replan", "question"];
 const FINAL_VERDICTS: readonly string[] = ["complete", "replan", "question"];
 const LIMIT_KINDS: readonly string[] = ["turns", "roundsPerStage", "replans", "runMs"];
@@ -451,7 +461,7 @@ export function canonical(value: unknown): string {
 
 export const sha256Hex = (data: string | Uint8Array): string => createHash("sha256").update(data).digest("hex");
 
-const DATA_SCHEMAS: Record<Exclude<EventType, V2Event>, (d: Record<string, unknown>) => boolean> = {
+const DATA_SCHEMAS: Record<Exclude<EventType, V2Event | SplitEvent>, (d: Record<string, unknown>) => boolean> = {
   "run.created": (d) => exactKeys(d, ["goal"]) && isTextRef(d.goal),
   "run.status": (d) => exactKeys(d, ["status", "reason"]) && oneOf(d.status, RUN_STATUSES)
     && (d.status === "paused" ? oneOf(d.reason, PAUSED_REASONS) : d.reason === null),
@@ -591,7 +601,7 @@ const DATA_SCHEMAS_V2: Record<string, (d: Record<string, unknown>) => boolean> =
     && oneOf(d.provider, ["codex", "claude"]) && str(d.mode, 64) && strOrNull(d.sessionId, 128) && isTextRef(d.task),
   "orch.turn": (d) => keysWithin(d, ["turnId", "purpose", "stage", "round", "planVersion", "clarificationVersion"], ["tree"])
     && isUuid(d.turnId) && oneOf(d.purpose, TURN_PURPOSES)
-    && (d.purpose === "plan" || d.purpose === "final_review" ? d.stage === null && d.round === null : isPos(d.stage) && isPos(d.round))
+    && (d.purpose === "plan" || d.purpose === "final_review" || d.purpose === "decompose" ? d.stage === null && d.round === null : isPos(d.stage) && isPos(d.round))
     && (d.planVersion === null || isPos(d.planVersion)) && isNonNeg(d.clarificationVersion)
     && (d.tree === undefined || d.tree === null || isGitOid(d.tree)),
   "review.assessed": (d) => exactKeys(d, ["turnId", "stage", "request", "report", "applied", "clarificationVersion", "runKey"]) && isUuid(d.turnId)
@@ -618,7 +628,14 @@ const isFindingId = (v: unknown): v is string => typeof v === "string" && /^F[1-
 // C3: a resolution run's records — v2's, its run.created with its kind, and the application's plan beside the lead's
 const DATA_SCHEMAS_RESOLUTION: Record<string, (d: Record<string, unknown>) => boolean> = {
   ...DATA_SCHEMAS_V2,
-  "run.created": (d) => exactKeys(d, ["goal", "kind"]) && isTextRef(d.goal) && d.kind === "resolution",
+  "run.created": (d) => exactKeys(d, ["goal", "kind"]) && isTextRef(d.goal) && (d.kind === "resolution" || d.kind === "decomposition"),
+  // the completion kinds of a decomposition run beside v2's (E1)
+  "run.status": (d) => DATA_SCHEMAS_V2["run.status"](d) || (exactKeys(d, ["status", "reason", "completion"]) && d.status === "completed" && d.reason === null
+    && exactKeys(d.completion, ["kind", "basis"]) && oneOf(d.completion.kind, ["proposed", "whole", "rejected"]) && isTextRef(d.completion.basis)),
+  // E1 (stage-e-decomposition.md §3.2)
+  "decomposition.proposed": (d) => exactKeys(d, ["turnId", "proposal"]) && isUuid(d.turnId) && isTextRef(d.proposal),
+  "decomposition.rejected": (d) => exactKeys(d, ["turnId", "reasons"]) && isUuid(d.turnId) && isTextRef(d.reasons),
+  "decomposition.whole": (d) => exactKeys(d, ["turnId", "why"]) && isUuid(d.turnId) && isTextRef(d.why),
   "plan.recorded": (d) => Object.hasOwn(d, "by")
     ? exactKeys(d, ["by", "version", "plan", "firstStage", "stageCount", "conditionsAssigned"]) && d.by === "app" && d.version === 1 && isTextRef(d.plan)
       && d.firstStage === 1 && isInt(d.stageCount) && d.stageCount >= 1 && d.stageCount <= 50 && isInt(d.conditionsAssigned) && d.conditionsAssigned >= 0 && d.conditionsAssigned <= 600
@@ -653,7 +670,7 @@ export function applyRecord(state: RunState | null, rec: JournalRecord): RunStat
   if (state === null) {
     if (rec.type !== "run.created") conflict("the first record must be run.created");
     return {
-      runId: rec.runId, version: rec.v === RESOLUTION_VERSION ? 2 : rec.v, ...(rec.v === RESOLUTION_VERSION ? { envelope: RESOLUTION_VERSION } : {}), preview: rec.formatPreview === true, completion: null,
+      runId: rec.runId, version: rec.v === RESOLUTION_VERSION ? 2 : rec.v, ...(rec.v === RESOLUTION_VERSION ? { envelope: RESOLUTION_VERSION, kind: d.kind as "resolution" | "decomposition" } : {}), preview: rec.formatPreview === true, completion: null,
       status: "preparing", pausedReason: null, lastSeq: rec.seq, lastHash: rec.hash,
       goal: d.goal as TextRef, turns: {}, commands: {}, workspace: null, checks: {},
       orch: {
@@ -662,7 +679,7 @@ export function applyRecord(state: RunState | null, rec: JournalRecord): RunStat
         lastPausedSeq: {}, assessed: {}, limitOverrides: {}, recoveryDecisions: {},
         prepares: [], classified: {}, grants: {}, applied: 0, finish: [],
         lastOrchTurn: null, checksProposal: null, checksDecision: null, confirmations: [], amended: {}, discarded: {}, reviewPermits: [],
-        nextCondition: 1, proposals: [], person: [], decidedCommands: []
+        nextCondition: 1, proposals: [], person: [], decidedCommands: [], split: { proposed: null, whole: null, rejected: [] }
       }
     };
   }
@@ -876,6 +893,8 @@ function applyOrchRecord(state: RunState, rec: JournalRecord): void {
       const id = d.turnId as string;
       // written before turn.intent; a bare turn.intent (without orch.turn) stays valid
       if (Object.hasOwn(o.turns, id) || Object.hasOwn(state.turns, id)) conflict(`orch.turn ${id} is not before its intent`);
+      // E1: a decomposition journal has decompose turns only, and they are its alone
+      if ((d.purpose === "decompose") !== (state.kind === "decomposition")) conflict(`a ${String(d.purpose)} turn in a ${state.kind ?? "run"} journal`);
       // the final form of v2 (A4, §3.4): every orch.turn says its tree (null but for the reviewer)
       if (finalForm(state) && d.tree === undefined) throw new JournalError("invalid_event", "orch.turn without its tree");
       o.lastOrchTurn = id;
@@ -887,6 +906,7 @@ function applyOrchRecord(state: RunState, rec: JournalRecord): void {
       break;
     }
     case "plan.recorded": {
+      if (state.kind === "decomposition") conflict("a plan in a decomposition journal");
       // C3: the application's plan of a resolution run — its first record after the workspace, before any turn
       if (d.by === "app") {
         if (o.plan || Object.keys(state.turns).length || !state.workspace) conflict("the application's plan comes first, after the workspace");
@@ -973,6 +993,21 @@ function applyOrchRecord(state: RunState, rec: JournalRecord): void {
       if (t.stage !== d.stage) conflict(`review stage ${String(d.stage)} is not the turn's stage`);
       if (o.reviews.some((r) => r.turnId === d.turnId)) conflict(`turn ${String(d.turnId)} already recorded a review`);
       o.reviews.push({ ...(d as unknown as ReviewRecordedData), seq: rec.seq });
+      break;
+    }
+    case "decomposition.proposed":
+    case "decomposition.rejected":
+    case "decomposition.whole": {
+      // E1 (§3.2): the answer of the last decompose turn, once for the turn
+      if (state.kind !== "decomposition") conflict(`${rec.type} in a journal that is not a decomposition's`);
+      const id = d.turnId as string;
+      completedTurn(id, ["decompose"]);
+      if (o.lastOrchTurn !== id) conflict(`${rec.type} for a turn that is not the last`);
+      if (o.split.proposed?.turnId === id || o.split.whole?.turnId === id || o.split.rejected.some((x) => x.turnId === id)) conflict(`turn ${id} has its answer`);
+      const answer = { turnId: id, ref: (d.proposal ?? d.reasons ?? d.why) as TextRef, seq: rec.seq };
+      if (rec.type === "decomposition.proposed") o.split.proposed = answer;
+      else if (rec.type === "decomposition.whole") o.split.whole = answer;
+      else o.split.rejected.push(answer);
       break;
     }
     case "question.asked": {
@@ -1252,6 +1287,16 @@ export function checksPassed(state: RunState, ids: readonly string[]): boolean {
 // rest, from the texts, is textsConflict below). journal-v2-format.md §2.3, A1.
 function completedAllowed(state: RunState, completion: { kind: CompletionKind }): void {
   const o = state.orch;
+  if (state.kind === "decomposition") {
+    // E1 (§3.2): the last turn is a decompose turn and its answer is what the completion says
+    const last = o.lastOrchTurn;
+    const s = o.split;
+    const ok = !!last && o.turns[last]?.purpose === "decompose" && state.turns[last]?.status === "completed"
+      && (completion.kind === "proposed" ? s.proposed?.turnId === last : completion.kind === "whole" ? s.whole?.turnId === last
+        : completion.kind === "rejected" && s.rejected.length >= 2 && s.rejected.at(-1)?.turnId === last);
+    if (!ok) conflict(`completed ${completion.kind} without the matching answer of the last decompose turn`);
+    return;
+  }
   if (proposalWaits(state)) conflict("completed while the proposed check commands wait for a decision");
   if (planProposalWaits(state)) conflict("completed while a plan proposal waits for the person");
   if (o.finish.some((f) => f.status === "in_flight" || f.status === "outcome_unknown" || f.status === "unknown")) conflict("completed with an action after success without its result");
@@ -1324,7 +1369,7 @@ export function textsConflict(state: RunState, t: V2Texts): string | null {
     const ok = o.confirmations.some((c) => c.seq > commitSeq && c.seq < f.seq && c[f.step as "push" | "qa"] === "confirm" && c.tree === params.tree && c.commit === params.commit);
     if (!ok) return `${f.step} of a run without checks delivers another tree or commit than the person confirmed`;
   }
-  if (state.completion) {
+  if (state.completion && state.kind !== "decomposition") {
     const n = d ? d.count : own?.length ?? 0;
     if ((state.completion.kind === "no_checks") !== (n === 0)) return `completed ${state.completion.kind} with ${n} check commands`;
     if (state.completion.kind === "confirmed" && !checksPassed(state, Array.from({ length: n }, (_, i) => `cmd-${i + 1}`))) return "completed confirmed with a command that did not pass";
@@ -1529,7 +1574,7 @@ export function parseJournal(buf: Uint8Array, runId: string, opts: ReaderOptions
   if (newer !== null) return parseNewerJournal(buf, runId, newer, opts.readerVersion ?? READER_VERSION, newer <= (opts.maxVersion ?? MAX_JOURNAL_VERSION));
   if (buf.length > MAX_JOURNAL_BYTES) return corrupt("journal_too_large");
   // by the first record; a mismatch later is the line's error
-  const version = firstVersion(buf) === 2 ? 2 : isResolutionJournal(buf) ? RESOLUTION_VERSION : JOURNAL_VERSION;
+  const version = firstVersion(buf) === 2 ? 2 : isResolutionHead(firstRecord(buf) ?? {}) ? RESOLUTION_VERSION : JOURNAL_VERSION;
   while (offset < buf.length) {
     const nl = buf.indexOf(0x0a, offset);
     if (nl < 0) {
@@ -1566,9 +1611,13 @@ function firstRecord(buf: Uint8Array): Record<string, unknown> | null {
 }
 const firstVersion = (buf: Uint8Array): unknown => firstRecord(buf)?.v;
 // C3: the first line of a resolution run's journal — v3, minReaderVersion 3, run.created of kind «resolution»
-const isResolutionHead = (r: Record<string, unknown>): boolean =>
-  r.v === RESOLUTION_VERSION && r.minReaderVersion === RESOLUTION_VERSION && r.type === "run.created" && isRecord(r.data) && r.data.kind === "resolution";
-export const isResolutionJournal = (buf: Uint8Array): boolean => { const r = firstRecord(buf); return !!r && isResolutionHead(r); };
+const isKindHead = (r: Record<string, unknown>, kind?: string): boolean =>
+  r.v === RESOLUTION_VERSION && r.minReaderVersion === RESOLUTION_VERSION && r.type === "run.created" && isRecord(r.data)
+  && (kind ? r.data.kind === kind : r.data.kind === "resolution" || r.data.kind === "decomposition");
+// E1 (stage-e-decomposition.md §3.2): the same envelope for a decomposition run's journal, run.created of kind «decomposition»
+const isResolutionHead = (r: Record<string, unknown>): boolean => isKindHead(r);
+export const isResolutionJournal = (buf: Uint8Array): boolean => { const r = firstRecord(buf); return !!r && isKindHead(r, "resolution"); };
+export const isDecompositionJournal = (buf: Uint8Array): boolean => { const r = firstRecord(buf); return !!r && isKindHead(r, "decomposition"); };
 
 // minReaderVersion of a newer journal's first record: an integer, or null (absent, not an integer, unreadable).
 export function minReaderVersion(buf: Uint8Array): number | null {

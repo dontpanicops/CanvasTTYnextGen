@@ -44,6 +44,9 @@ export interface Goal {
   // C3 (stage-c3-conflicts.md §3): a resolution run of a merge into the board's result — its copy starts from `base` (the
   // conflict as a commit), its plan is the application's. Not `task`: the run is never a task's run (metaOf, boardStatuses)
   resolution?: { mergeRunId: string; taskId: string; key: string; base: string };
+  // E1 (stage-e-decomposition.md §3.1): a decomposition run of a parent task — its copy starts from `base`, the lead only
+  // proposes the subtasks (decompose turns). Not `task`: the run is never the task's run
+  decomposition?: { taskId: string; key: string; base: string };
   // A1.1, the service's own (never in the goal text): the decided checks that run in the check profile — the lead's
   // lines the person did not let out of it (journal-v2-format.md §2.6)
   sandboxed?: string[];
@@ -148,6 +151,9 @@ function decide(input: CycleInput): Action {
     return { kind: "checkpoint", stage: orch.pendingCheckpoint, tree: orch.accepted[String(orch.pendingCheckpoint)].tree };
   }
   if (orch.question && !orch.question.answered) return pause("awaiting_answer", orch.question.questionId);
+  // E1 (§3.2): a decomposition run has no plan, checks or stages: a decompose turn until the lead's answer is accepted or
+  // refused twice (an answered question — the next turn carries the answer)
+  if (goal.decomposition) return orch.split.proposed || orch.split.whole || orch.split.rejected.length >= 2 ? { kind: "complete" } : turn("decompose", null, null);
 
   // Stage 13: the environment is prepared before the first turn. A failed preparation pauses once with what is
   // missing; after the person resumes from that pause it runs again. An interrupted one simply runs again.
@@ -291,8 +297,8 @@ export function autoAccepts(goal: Pick<Goal, "mode">, sandboxNetwork: "denied" |
 }
 
 // Journal v2: the plan turn proposes check commands — the first one of a goal without commands, before any proposal.
-export function proposesChecks(state: RunState, goal: Pick<Goal, "commands">): boolean {
-  return state.version === 2 && goal.commands?.length === 0 && state.orch.checksProposal === null;
+export function proposesChecks(state: RunState, goal: Pick<Goal, "commands" | "decomposition">): boolean {
+  return !goal.decomposition && state.version === 2 && goal.commands?.length === 0 && state.orch.checksProposal === null;
 }
 
 // A run of journal v2 whose decided set of check commands is empty: completed without checks (§2.3).

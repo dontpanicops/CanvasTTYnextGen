@@ -27,7 +27,9 @@ import {
   V2_MIN_READER_VERSION,
   RESOLUTION_VERSION,
   V2_EVENTS,
+  SPLIT_EVENTS,
   type V2Event,
+  type SplitEvent,
   type CompletionKind,
   sha256Hex,
   textsConflict,
@@ -142,7 +144,7 @@ export interface RunWriter {
   recordRecoveryDecision(data: RecoveryDecidedData): Promise<void>;
   // Stage 13 events (journal.ts schemas): preparation, failure classes, grants, actions after success; v2 journals
   // also the checks decision and the push/QA confirmation (journal-v2-format.md §2.1).
-  recordEvent(type: Stage13Event | V2Event, data: Record<string, unknown>): Promise<void>;
+  recordEvent(type: Stage13Event | V2Event | SplitEvent, data: Record<string, unknown>): Promise<void>;
   // Called with the new lastSeq after each record is durable (stage-7-contract.md: the position subscribers follow).
   onAppend(listener: (seq: number) => void): () => void;
   close(): Promise<void>;
@@ -162,8 +164,8 @@ export interface CheckFinishedInput {
 
 // version 2: a journal of format v2 (journal-v2-format.md) in its final form (A4, §3.4: no formatPreview; A1–A3
 // development builds marked theirs so).
-// kind «resolution» (C3, stage-c3-conflicts.md §7.2): a resolution run's journal — envelope v3, the rules of v2.
-export interface CreateRunOptions { goal: string; version?: 1 | 2; kind?: "resolution"; clock?: () => Date; io?: StoreIo }
+// kind «resolution» (C3, stage-c3-conflicts.md §7.2): a resolution run's journal — envelope v3, the rules of v2; «decomposition» (E1): the same.
+export interface CreateRunOptions { goal: string; version?: 1 | 2; kind?: "resolution" | "decomposition"; clock?: () => Date; io?: StoreIo }
 export interface OpenRunOptions { acceptTornTail?: boolean; clock?: () => Date; io?: StoreIo; hooks?: LockHooks }
 
 const JOURNAL = "journal.jsonl";
@@ -711,8 +713,8 @@ class Writer implements RunWriter {
     return this.append("recovery.decided", pick(data, ["commandId", "action", "turnId"]));
   }
 
-  recordEvent(type: Stage13Event | V2Event, data: Record<string, unknown>): Promise<void> {
-    if (!STAGE13_EVENTS.includes(type as Stage13Event) && !V2_EVENTS.includes(type as V2Event)) return Promise.reject(new StoreError("invalid_input", `${String(type)} is not a stage 13 event`));
+  recordEvent(type: Stage13Event | V2Event | SplitEvent, data: Record<string, unknown>): Promise<void> {
+    if (!STAGE13_EVENTS.includes(type as Stage13Event) && !V2_EVENTS.includes(type as V2Event) && !SPLIT_EVENTS.includes(type as SplitEvent)) return Promise.reject(new StoreError("invalid_input", `${String(type)} is not a stage 13 event`));
     return this.append(type, data);
   }
 
@@ -752,10 +754,10 @@ export async function createRun(root: string, runId: string, options: CreateRunO
     lock = await acquireLock(dir);
     const fh = await open(join(dir, JOURNAL), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_EXCL, 0o600);
     writer = new Writer({ runId, dir, fh, lock, staleLock: null, state: null, size: 0, version: options.version === 2 ? 2 : 1,
-      ...(options.kind === "resolution" ? { envelope: RESOLUTION_VERSION } : {}), clock: options.clock, io: options.io });
+      ...(options.kind ? { envelope: RESOLUTION_VERSION } : {}), clock: options.clock, io: options.io });
     await fsyncDir(dir);
     const goal = await writer.putText(options.goal);
-    await writer.append("run.created", options.kind === "resolution" ? { goal, kind: "resolution" } : { goal });
+    await writer.append("run.created", options.kind ? { goal, kind: options.kind } : { goal });
     return writer;
   } catch (error) {
     // The directory is ours (exclusive mkdir) and holds nothing confirmed: remove it rather than leave a broken run.

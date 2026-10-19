@@ -14,7 +14,7 @@ import { DEFAULT_TURN_LIMITS } from "./turn.ts";
 import type { AnswerSchema, SupervisorLaunch, TurnObserver, TurnOutcome, TurnResult } from "./types.ts";
 import type { AskPerson } from "./sessions.ts";
 
-export type TurnPurpose = "plan" | "execute" | "review" | "final_review";
+export type TurnPurpose = "plan" | "execute" | "review" | "final_review" | "decompose"; // decompose: E1, the lead proposes subtasks of a task
 export type AgentRole = "lead" | "executor" | "reviewer"; // reviewer: journal v2, A3 — the lead's CLI in a new session
 
 export interface AgentTurnRequest {

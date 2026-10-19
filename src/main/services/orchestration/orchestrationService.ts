@@ -85,6 +85,8 @@ export interface GoalInput {
   base?: { branch: string; commit: string; key: string };
   // C3, journal v2 rules in a resolution run's journal: the merge run it resolves for (stage-c3-conflicts.md §3)
   resolution?: { mergeRunId: string; taskId: string; key: string; base: string };
+  // E1, journal v2 rules in a decomposition run's journal: the parent task it splits (stage-e-decomposition.md §3.1)
+  decomposition?: { taskId: string; key: string; base: string };
 }
 
 // Stage 12: the checks of a goal with commands are those command lines, run by the user's login shell.
@@ -269,6 +271,7 @@ const findingsSchema = (verdicts: string[]): AnswerSchema => ({
     question: { type: ["string", "null"], maxLength: 2000 }
   }
 });
+const SPLIT_IDS = Array.from({ length: 10 }, (_, i) => `S${i + 1}`);
 export const REPORT_SCHEMAS: Readonly<Record<TurnPurpose, AnswerSchema>> = Object.freeze({
   plan: {
     type: "object", additionalProperties: false, required: ["stages", "question"],
@@ -285,7 +288,28 @@ export const REPORT_SCHEMAS: Readonly<Record<TurnPurpose, AnswerSchema>> = Objec
     properties: { summary: { type: "string", maxLength: 4000 }, done: { type: "boolean" } }
   },
   review: findingsSchema(["accept", "fix", "replan", "question"]),
-  final_review: findingsSchema(["complete", "replan", "question"])
+  final_review: findingsSchema(["complete", "replan", "question"]),
+  // E1 (stage-e-decomposition.md §3.3): ids are S1..S10 (an enum: the subset has no pattern); what it cannot say —
+  // criteria 1..16, exactly one of tasks / whole / question — reportProblem and splitViolations check
+  decompose: {
+    type: "object", additionalProperties: false, required: ["tasks", "whole", "question"],
+    properties: {
+      tasks: {
+        type: "array", maxItems: 10,
+        items: {
+          type: "object", additionalProperties: false, required: ["id", "title", "text", "criteria", "dependsOn", "covers"],
+          properties: {
+            id: { type: "string", enum: SPLIT_IDS }, title: str(1, 200), text: str(1, 4000),
+            criteria: { type: "array", maxItems: 16, items: str(1, 500) },
+            dependsOn: { type: "array", maxItems: 9, items: { type: "string", enum: SPLIT_IDS } },
+            covers: { type: "array", maxItems: 32, items: str(1, 16) }
+          }
+        }
+      },
+      whole: { type: ["string", "null"], maxLength: 2000 },
+      question: { type: ["string", "null"], maxLength: 2000 }
+    }
+  }
 });
 // Journal v2, A2 (journal-v2-format.md §2.7): every stage of a plan states its readiness conditions — new ones or the
 // plan in force's carried over (keep) — flat, as the schema subset has no anyOf. dropped and dropRequirements (5h §2.3)
@@ -399,6 +423,45 @@ export function narrowMarks(schema: AnswerSchema, conditions: readonly string[] 
 }
 for (const s of [...Object.values(REPORT_SCHEMAS), PLAN_PROPOSAL_SCHEMA, PLAN_V2_SCHEMA, REVIEW_V2_SCHEMA, FINAL_V2_SCHEMA, REVIEWER_SCHEMA, FINAL_REVIEWER_SCHEMA]) compileSchema(s); // a schema the engine would refuse fails at load
 
+// E1 (stage-e-decomposition.md §3.3, §4)
+export interface SplitTask { id: string; title: string; text: string; criteria: string[]; dependsOn: string[]; covers: string[] }
+interface SplitReport { tasks: SplitTask[]; whole: string | null; question: string | null }
+
+// E1 (§4): the formal check of a proposal against the parent's requirements R1..Rn (n = criteria). The reasons go to the
+// lead in the next turn; none: the proposal stands.
+export function splitViolations(tasks: readonly SplitTask[], criteria: number): string[] {
+  const out: string[] = [];
+  if (tasks.length < 2 || tasks.length > 10) out.push(`${tasks.length} subtasks: there must be 2..10`);
+  const ids = new Set(tasks.map((t) => t.id));
+  if (ids.size !== tasks.length) out.push("subtask ids are not unique");
+  if (new Set(tasks.map((t) => t.title.trim())).size !== tasks.length) out.push("subtask titles are not unique");
+  for (const t of tasks) {
+    if (t.criteria.length < 1 || t.criteria.length > 16) out.push(`${t.id}: 1..16 criteria`);
+    for (const d of t.dependsOn) {
+      if (d === t.id) out.push(`${t.id} depends on itself`);
+      else if (!ids.has(d)) out.push(`${t.id} depends on ${d}, which is not in the list`);
+    }
+  }
+  // a cycle: the subtasks left after repeatedly taking those with nothing unfinished to wait for
+  let left = tasks.filter((t) => t.dependsOn.every((d) => ids.has(d) && d !== t.id));
+  const done = new Set<string>();
+  for (let n = -1; left.length !== n;) {
+    n = left.length;
+    for (const t of left) if (t.dependsOn.every((d) => done.has(d))) done.add(t.id);
+    left = left.filter((t) => !done.has(t.id));
+  }
+  if (left.length) out.push(`dependsOn has a cycle through ${left.map((t) => t.id).join(", ")}`);
+  const known = new Set(Array.from({ length: criteria }, (_, i) => `R${i + 1}`));
+  const covered = new Set<string>();
+  for (const t of tasks) for (const r of t.covers) {
+    if (!known.has(r)) out.push(`${t.id} covers ${r}, which is not a requirement of the task (R1..R${criteria})`);
+    else covered.add(r);
+  }
+  const missing = [...known].filter((r) => !covered.has(r));
+  if (missing.length) out.push(`requirements not covered by any subtask: ${missing.join(", ")}`);
+  return out;
+}
+
 interface PlanReport { stages: { title: string; task: string }[]; question: string | null }
 interface ProposedCheck { command: string; why: string; source: string[] }
 // checks.proposed.proposal (journal-v2-format.md §2.1)
@@ -414,6 +477,12 @@ function reportProblem(purpose: TurnPurpose, value: unknown, schema: AnswerSchem
   const proposal = schema === PLAN_PROPOSAL_SCHEMA;
   const errors = validateAnswer(schema, value);
   if (errors.length) return errors.slice(0, 3).join("; ");
+  if (purpose === "decompose") {
+    const r = value as SplitReport;
+    const given = [r.tasks.length > 0, r.whole !== null && r.whole.trim() !== "", r.question !== null && r.question.trim() !== ""].filter(Boolean).length;
+    if (given !== 1 || (r.whole !== null && r.whole.trim() === "") || (r.question !== null && r.question.trim() === "")) return "exactly one of tasks, whole, question";
+    return null;
+  }
   if (purpose === "plan") {
     const p = value as PlanReport;
     if (p.question !== null && p.question.trim() === "") return "question must be null or non-empty";
@@ -472,6 +541,8 @@ function checkGoal(input: GoalInput, registryOf: (commands: string[] | null) => 
   const task = input.task === undefined ? undefined : checkTask(input.task, v2, bad);
   const base = input.base === undefined ? undefined : checkBase(input.base, v2, input.workMode, bad);
   const resolution = input.resolution === undefined ? undefined : checkResolution(input, v2, bad);
+  const decomposition = input.decomposition === undefined ? undefined : checkDecomposition(input, v2, bad);
+  if (resolution && decomposition) bad("resolution and decomposition exclude each other");
   const registry = registryOf(commands);
   if (typeof input?.text !== "string" || input.text.trim() === "" || input.text.length > 8000) bad("text must be 1..8000 characters");
   if (!Array.isArray(input.criteria) || input.criteria.length < 1 || input.criteria.length > 32
@@ -493,8 +564,23 @@ function checkGoal(input: GoalInput, registryOf: (commands: string[] | null) => 
     ...(input.mode ? { mode: input.mode } : {}), ...(prepare ? { prepare } : {}), ...(finish ? { finish } : {}),
     ...(input.access ? { access: { claude: input.access.claude, codex: input.access.codex } } : {}),
     ...(models ? { models } : {}), ...(input.language ? { language: input.language } : {}), ...(task ? { task } : {}),
-    ...(base ? { base } : {}), ...(resolution ? { resolution } : {})
+    ...(base ? { base } : {}), ...(resolution ? { resolution } : {}), ...(decomposition ? { decomposition } : {})
   };
+}
+
+// E1 (stage-e-decomposition.md §3.1): a decomposition run — journal v2's rules, a separate copy from `base`, no check
+// commands (the lead only proposes subtasks), no task, no other base
+function checkDecomposition(input: GoalInput, v2: boolean, bad: (m: string) => never): { taskId: string; key: string; base: string } {
+  const o = input.decomposition as Record<string, unknown> | null;
+  if (!o || typeof o !== "object" || Array.isArray(o) || Object.keys(o).sort().join() !== "base,key,taskId") bad("decomposition must be { taskId, key, base }");
+  if (!TASK_ID.test(String(o!.taskId))) bad("decomposition: taskId is a UUID");
+  if (typeof o!.key !== "string" || !/^T-\d{1,6}$/.test(o!.key)) bad("decomposition.key must be T-<n>");
+  if (typeof o!.base !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(o!.base)) bad("decomposition.base must be a full commit id");
+  if (!v2 || !Array.isArray(input.commands) || input.commands.length) bad("decomposition: a journal v2 goal with empty check commands");
+  if (input.workMode !== "copy") bad("decomposition: a separate copy only");
+  if (input.task !== undefined || input.base !== undefined || input.prepare !== undefined || input.finish !== undefined) bad("decomposition: no task, base, preparation or actions after success");
+  if ((input.mode ?? "autopilot") !== "autopilot" || input.reviewPlan === true) bad("decomposition: the autopilot, no plan review");
+  return { taskId: o!.taskId as string, key: o!.key as string, base: o!.base as string };
 }
 
 // C3: a resolution run — journal v2's rules, a separate copy from the conflict's commit, the project's checks and the
@@ -623,11 +709,12 @@ export function createOrchestrationService(deps: OrchestrationDeps) {
       const goal = checkGoal(input.goal, (commands) => registryFor(deps, commands), clock(), v2);
       if (input.requestKey !== undefined) goal.requestKey = input.requestKey;
       const runId = input.runId ?? randomUUID();
-      const writer = await storeCreateRun(deps.root, runId, { goal: canonical(goal), version: v2 ? 2 : 1, ...(goal.resolution ? { kind: "resolution" as const } : {}), io: deps.storeIo });
+      const writer = await storeCreateRun(deps.root, runId, { goal: canonical(goal), version: v2 ? 2 : 1,
+        ...(goal.resolution ? { kind: "resolution" as const } : goal.decomposition ? { kind: "decomposition" as const } : {}), io: deps.storeIo });
       let ws: Workspace;
       try {
         ws = await createWorkspace({ root: deps.root, runId, source: input.source, gitPath: deps.gitPath, mode: goal.workMode ?? "copy",
-          ...(goal.base ? { from: goal.base.commit } : goal.resolution ? { from: goal.resolution.base } : {}) });
+          ...(goal.base ? { from: goal.base.commit } : goal.resolution ? { from: goal.resolution.base } : goal.decomposition ? { from: goal.decomposition.base } : {}) });
         await writer.recordWorkspaceCreated({
           sourcePathSha256: createHash("sha256").update(ws.sourcePath).digest("hex"),
           baseline: { commit: ws.baseline.commit, tree: ws.baseline.tree }, head: ws.head
@@ -1185,7 +1272,7 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
   async function runTurn(action: Extract<Action, { kind: "turn" }>, snapshot: Snapshot): Promise<void> {
     const st = state();
     // A3 (§2.8): the reviewer reviews a v2 journal the lead did not review — a new session of the lead's CLI each time
-    const role: AgentRole = action.purpose === "execute" ? "executor" : action.purpose !== "plan" && byReviewer(st) ? "reviewer" : "lead";
+    const role: AgentRole = action.purpose === "execute" ? "executor" : action.purpose !== "plan" && action.purpose !== "decompose" && byReviewer(st) ? "reviewer" : "lead";
     const limits = effectiveLimits(goal, st);
     // the report is checked against the purpose's schema; the CLI is offered the narrowed one (turnSchema)
     const schema = schemaOf(action.purpose, st, goal);
@@ -1286,6 +1373,7 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
     const value = result.report.value;
     if (reportProblem(action.purpose, value, schema) !== null) { await setStatus("paused", "invalid_report"); return; }
 
+    if (action.purpose === "decompose") return recordSplit(turnId, value as SplitReport);
     if (action.purpose === "plan") {
       const p = value as PlanReport;
       if (p.question !== null) return askQuestion(turnId, p.question);
@@ -1359,6 +1447,25 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
 
   function stoppedByUs(): boolean {
     return state().status === "stopping";
+  }
+
+  // E1 (stage-e-decomposition.md §3.2, §4): a valid decompose report is a question, the answer «whole», or a proposal the
+  // application checks: accepted (decomposition.proposed) or refused with its reasons (decomposition.rejected)
+  async function recordSplit(turnId: string, r: SplitReport): Promise<void> {
+    if (r.question !== null) return askQuestion(turnId, r.question);
+    if (r.whole !== null) {
+      const why = await j(() => writer.putText(r.whole!));
+      await j(() => writer.recordEvent("decomposition.whole", { turnId, why }));
+      return;
+    }
+    const reasons = splitViolations(r.tasks, goal.criteria.length);
+    if (reasons.length) {
+      const ref = await j(() => writer.putText(canonical(reasons)));
+      await j(() => writer.recordEvent("decomposition.rejected", { turnId, reasons: ref }));
+      return;
+    }
+    const ref = await j(() => writer.putText(canonical({ tasks: r.tasks })));
+    await j(() => writer.recordEvent("decomposition.proposed", { turnId, proposal: ref }));
   }
 
   async function askQuestion(turnId: string, text: string): Promise<void> {
@@ -1521,6 +1628,15 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
   async function complete(snapshot: Snapshot): Promise<void> {
     const st = state();
     if (st.version !== 2) return setStatus("completed");
+    // E1 (§3.2): a decomposition run completes with what its last decompose turn answered; no checks, no conditions
+    if (goal.decomposition) {
+      const sp = st.orch.split;
+      const answer = sp.proposed ?? sp.whole ?? sp.rejected.at(-1)!;
+      const kind: CompletionKind = sp.proposed ? "proposed" : sp.whole ? "whole" : "rejected";
+      const ref = await j(() => writer.putText(canonical({ kind, turnId: answer.turnId, ref: answer.ref })));
+      await j(() => writer.setRunStatus("completed", null, { kind, basis: ref }));
+      return;
+    }
     const cs = await conds();
     const facts = conditionFacts(st, goal, cs, snapshot.checkKeys, cs ? await staleOn(st, cs, snapshot.tree) : null);
     const f = cs?.findings ?? null;
@@ -2034,7 +2150,8 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
     const st = state();
     const text = async (ref: TextRef | null) => ref ? (await readText(root, runId, ref)).toString("utf8") : "";
     // A3 (5h §3.2): the reviewer gets no executor's report or task and no lead's conversation
-    const reviewer = action.purpose !== "plan" && action.purpose !== "execute" && byReviewer(st);
+    const reviewer = action.purpose !== "plan" && action.purpose !== "execute" && action.purpose !== "decompose" && byReviewer(st);
+    if (action.purpose === "decompose") return splitTask(st, text);
     const parts: string[] = [
       `Role: ${action.purpose === "execute" ? "executor" : reviewer ? "reviewer" : "lead"}. Purpose: ${action.purpose}.`,
       ...(goal.language ? [languageLine(goal.language)] : []),
@@ -2114,6 +2231,38 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
     if (st.version === 2) parts.push(...await conditionLines(action, snapshot));
     if (byReviewer(st)) parts.push(...await findingLines(action, snapshot, reviewer));
     parts.push(`Answer only with the JSON object the schema describes.`);
+    return parts.join("\n\n");
+  }
+
+  // E1 (stage-e-decomposition.md §3.3): the task of a decompose turn — the parent's goal and requirements, the rules of a
+  // proposal, the reasons of the earlier refusals and the person's answer. No checks, conditions or findings.
+  async function splitTask(st: RunState, text: (ref: TextRef | null) => Promise<string>): Promise<string> {
+    const n = goal.criteria.length;
+    const limits = effectiveLimits(goal, st);
+    const used = Object.keys(st.turns).length;
+    const parts = [
+      "Role: lead. Purpose: decompose.",
+      ...(goal.language ? [languageLine(goal.language)] : []),
+      `Goal:\n${goal.text}`,
+      `Requirements (R<n> is acceptance criterion n, fixed):\n${goal.criteria.map((c, i) => `R${i + 1}: ${c}`).join("\n")}`,
+      ["Rules for the decomposition:",
+        "- Inspect the project yourself (read-only) before answering; this turn only proposes, nothing is changed.",
+        `- Propose 2..10 subtasks that together cover every requirement R1..R${n}. Each has an id (S1..S10, unique), a title (unique, up to 200 characters),`
+          + " a text (up to 4000 characters: what to do, self-contained), its own criteria (1..16, each up to 500 characters),"
+          + " covers (the R ids it closes) and dependsOn (S ids of this list it needs finished first, no cycles).",
+        "- Every requirement is covered by at least one subtask, and covers names no requirement outside R1.." + `R${n}.`,
+        "- If splitting does not help, answer whole: why the task stays as one (tasks: []). If you need an answer from the person first, answer question.",
+        "- Exactly one of tasks, whole, question is filled; the others are [] or null."].join("\n"),
+      `Budget: this is turn ${used + 1} of at most ${limits.turns}. A proposal that does not pass the application's check is returned once with its reasons; the second refusal ends the run.`
+    ];
+    if (st.orch.clarifications > 0) parts.push(`User clarifications (${st.orch.clarifications}):\n${await clarificationTexts()}`);
+    if (st.orch.split.rejected.length) {
+      const reasons: string[] = [];
+      for (const x of st.orch.split.rejected) reasons.push(...(JSON.parse(await text(x.ref)) as string[]).map((r) => `- ${r}`));
+      parts.push(`Your previous proposal was not accepted by the application:\n${reasons.join("\n")}\nPropose again, fixing exactly this.`);
+    }
+    if (st.orch.question?.answered) parts.push(`Answer to your question: ${await text(st.orch.question.answerRef)}`);
+    parts.push("Answer only with the JSON object the schema describes.");
     return parts.join("\n\n");
   }
 

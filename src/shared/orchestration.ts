@@ -4,7 +4,7 @@
 
 export type OrchestrationRunStatus =
   | "preparing" | "running" | "pausing" | "paused" | "stopping" | "stopped" | "completed" | "failed";
-export type OrchestrationTurnPurpose = "plan" | "execute" | "review" | "final_review";
+export type OrchestrationTurnPurpose = "plan" | "execute" | "review" | "final_review" | "decompose"; // decompose: E1
 export type OrchestrationLimitKind = "turns" | "roundsPerStage" | "replans" | "runMs";
 export type OrchestrationRunLimitKind = OrchestrationLimitKind | "noProgressRounds" | "leadTurnMs" | "executorTurnMs";
 
@@ -312,7 +312,7 @@ export interface OrchestrationRunProgress {
   finish: { step: "commit" | "push" | "qa"; asked: boolean; status: string; established: boolean; commit: string | null; evidence: string | null; version?: OrchestrationQaVersion | null; observed?: string | null; declined?: boolean }[];
   grantsApplied: number;
   // journal v2 (journal-v2-format.md §2.3): a completed run's kind; no_checks is never shown as confirmed
-  completion?: "confirmed" | "no_checks" | null;
+  completion?: "confirmed" | "no_checks" | "proposed" | "whole" | "rejected" | null; // the last three: a decomposition run (E1)
   // journal v2: where the check commands came from — the goal, the lead's proposal as accepted, or edited by the person
   checksFrom?: "goal" | "proposal" | "edited" | null;
   // journal v2, A2 (journal-v2-format.md §2.7): requirements and readiness conditions with their evidence; null — the run
