@@ -5,8 +5,8 @@
 //      pauses as before, the board's autopilot stays on — «waiting for the Claude limit until …», the task's pause names
 //      the limit with its time;
 //   3. the reset passes: the autopilot continues the run itself — «continued T-1 after the limit reset …», the task
-//      «Done», the autopilot «all done»; the notification «The limit reset, continuing: T-1» (when the window is not in
-//      focus) and the Dock badge back to 0;
+//      «Done», the autopilot «all done»; the notification «The limit reset, continuing: T-1» (the window made to look
+//      out of focus) and the Dock badge back to 0;
 //   the project folder, its HEAD, status and branches as they were.
 // Needs `npm run build` first. Starts no real model. Usage: node scripts/smoke-board-limit-ui.mjs [--shots <dir>]
 import { execFileSync } from "node:child_process";
@@ -116,6 +116,8 @@ try {
   await boardShot("limit-01-waits-board");
 
   // ---------- 3. the reset passes: continued by itself ----------
+  // the window out of focus, as the person away: notifications are told only then (the OS focus is the machine's, not the smoke's)
+  await app.ev("document.hasFocus = () => false; true");
   const resumed = await waitForValue(() => app.ev(`${q("[data-board-autopilot-resumed]")}?.textContent ?? null`), "the autopilot continued", 120_000).catch(() => null);
   expect(/^продолжил T-1 после сброса лимита в /.test(resumed ?? ""), "the autopilot: «продолжил T-1 после сброса лимита в …»", resumed);
   await app.waitFor(`${q('[data-board-autopilot-stop="all_done"]')} && true`, "the autopilot done", 120_000);
@@ -124,8 +126,7 @@ try {
   const out = app.output();
   const notes = [...out.matchAll(/\[smoke\] notify (\{.*\})/g)].map((m) => JSON.parse(m[1]));
   const told = notes.find((n) => n.title === "Лимит сброшен, продолжаю: T-1");
-  const focused = await app.ev("document.hasFocus()");
-  expect(told ? told.body === "Claude" : focused, "the notification «Лимит сброшен, продолжаю: T-1» (or the window was in focus: none, by the rule)", { notes, focused });
+  expect(told?.body === "Claude" && told.runId === v2.facts[0].runId, "the notification «Лимит сброшен, продолжаю: T-1», opening the run", notes);
   const badges = [...out.matchAll(/\[smoke\] notify badge (\d+)/g)].map((m) => Number(m[1]));
   expect(badges.at(-1) === 0, "the Dock badge back to 0", badges);
   await boardShot("limit-02-done-board");
