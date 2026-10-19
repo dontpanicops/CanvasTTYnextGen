@@ -79,6 +79,8 @@ export interface BoardMerge {
   task: { id: string; key: string; runId: string; commit: string };
   status: BoardMergeStatus;
   // paused: merge_conflict | merge_checks_failed | merge_prepare_failed | merge_prepare_changed | recovered;
+  // C3: merge_agent_failed (detail: limit:<kind> | replan | stopped | failed | markers | copy_changed | checks_after) |
+  // merge_waits_slot | merge_budget;
   // stopped: skipped | interrupted; failed: head_moved | error; completed: null | already (the result was in the head)
   reason: string | null;
   detail: string | null;
@@ -89,6 +91,8 @@ export interface BoardMerge {
   retrying: boolean; // the first checks failed; the retry waits for the project to be quiet
   dir: string | null; // the merge copy, where the person resolves
   createdAt: number;
+  // C3 (stage-c3-conflicts.md §2): the latest try of an agent — its resolution run; pending while the merge waits for it
+  agent?: { attempt: number; reason: "conflict" | "checks"; resolutionRunId: string; pending: boolean };
 }
 
 // A task's mark on the board (§4.4): its latest merge into the current head of its place — of its current run (a task
