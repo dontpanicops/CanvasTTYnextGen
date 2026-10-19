@@ -475,7 +475,11 @@ export const providerName = (provider: string): string => PROVIDER_NAMES[provide
 
 // The reason in words, the same everywhere: the run panel, the activity rows, the agent cards, the feed and the history.
 export function causeText(locale: LocaleId, cause: PauseCause): string {
-  if (cause.kind === "provider_limit") return t(locale, "orchReason_provider_limit").replace("{provider}", providerName(cause.provider));
+  if (cause.kind === "provider_limit") {
+    // C4: main's own reset, when it recognised one
+    if (cause.resetsAtMs !== null) return t(locale, "orchReason_provider_limit_at").replace("{provider}", providerName(cause.provider)).replace("{at}", resetTime(locale, cause.resetsAtMs));
+    return t(locale, "orchReason_provider_limit").replace("{provider}", providerName(cause.provider));
+  }
   if (cause.kind === "prepare") return t(locale, "orchReason_prepare_failed").replace("{command}", cause.command ?? "?");
   if (cause.kind === "model_unsupported") return t(locale, "orchReason_model_unsupported").replace("{provider}", providerName(cause.provider)).replace("{model}", cause.model);
   const ending = cause.kind === "ending" ? t(locale, `orchEnding_${cause.step}` as TranslationKey) : undefined;

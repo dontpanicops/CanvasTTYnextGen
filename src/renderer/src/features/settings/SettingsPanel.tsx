@@ -1152,7 +1152,9 @@ function NotificationSettingsGroup({ settings, onChange }: { settings: AppSettin
   const rows: [keyof NotificationSettings, TranslationKey, TranslationKey][] = [
     ["waiting", "notifyWaiting", "notifyWaitingDescription"], ["completed", "notifyCompleted", "notifyCompletedDescription"],
     ["failed", "notifyFailed", "notifyFailedDescription"], ["dockBadge", "notifyDockBadge", "notifyDockBadgeDescription"],
-    ["bounce", "notifyBounce", "notifyBounceDescription"], ["board", "notifyBoard", "notifyBoardDescription"]
+    ["bounce", "notifyBounce", "notifyBounceDescription"], ["board", "notifyBoard", "notifyBoardDescription"],
+    // C4: under «board», shown while it is on
+    ...(settings.notifications.board ? [["boardHead", "notifyBoardHead", "notifyBoardHeadDescription"] as [keyof NotificationSettings, TranslationKey, TranslationKey]] : [])
   ];
   return (
     <>

@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { LocaleId, NotificationSettings } from "../../../../shared/contracts";
 import { t } from "../../lib/i18n";
-import { NOTIFIED_KEY, NOTIFY_UNAVAILABLE_KEY, boardNotes, notifyStep, pruneNotified, type Note } from "./notify";
-import type { AutopilotState } from "../../../../shared/taskBoard";
+import { NOTIFIED_KEY, NOTIFY_UNAVAILABLE_KEY, boardHeadNotes, boardNotes, notifyStep, pruneNotified, type Note } from "./notify";
+import type { AutopilotState, BoardHead } from "../../../../shared/taskBoard";
 import type { RunActivityState, RunState } from "./useOrchestration";
 
 const store = {
@@ -17,11 +17,14 @@ const store = {
 };
 
 const NO_AUTOPILOT: Record<string, AutopilotState> = {};
-export function useRunNotifications({ locale, prefs, runs, activity, title, open, accepting = 0, autopilot = NO_AUTOPILOT, boardPlace = () => "" }: {
+const NO_HEADS: BoardHead[] = [];
+const projectName = (project: string): string => project.split("/").filter(Boolean).at(-1) ?? "Raoden Loom";
+export function useRunNotifications({ locale, prefs, runs, activity, title, open, accepting = 0, autopilot = NO_AUTOPILOT, boardPlace = () => "", heads = NO_HEADS }: {
   locale: LocaleId; prefs: NotificationSettings; runs: Record<string, RunState>; activity: Record<string, RunActivityState>;
   title(runId: string): string; open(runId: string): void;
   accepting?: number; // the board's tasks waiting for «Accept the result» (counted on the badge)
   autopilot?: Record<string, AutopilotState>; boardPlace?(linkId: string): string; // B4: the board's autopilot of each link
+  heads?: BoardHead[]; // C4: the board's merged heads (their merges waiting for the person, the head moving)
 }): { banner: Note[]; openNote(runId: string): void; dismiss(runId: string): void } {
   const notified = useRef<Record<string, string> | null>(null);
   const badge = useRef<number | null>(null);
@@ -37,17 +40,19 @@ export function useRunNotifications({ locale, prefs, runs, activity, title, open
     const focused = document.hasFocus() && !document.hidden;
     const step = notifyStep(locale, list, notified.current, prefs, focused, true, accepting);
     const board = boardNotes(locale, autopilot, step.notified, prefs, focused, boardPlace);
-    step.notes.push(...board.notes);
-    notified.current = board.notified;
-    store.write(board.notified);
-    if (badge.current !== step.badge) { badge.current = step.badge; window.canvasTTY.notify.setBadge(step.badge); }
+    const head = boardHeadNotes(locale, heads, autopilot, board.notified, prefs, focused, projectName);
+    step.notes.push(...board.notes, ...head.notes);
+    notified.current = head.notified;
+    store.write(head.notified);
+    const count = step.badge + (prefs.dockBadge ? head.waiting : 0); // C4: a merge waiting for the person is the person's too
+    if (badge.current !== count) { badge.current = count; window.canvasTTY.notify.setBadge(count); }
     if (step.bounce) window.canvasTTY.notify.bounce();
     for (const n of step.notes) {
       if (store.unavailable()) { toBanner(n); continue; }
       shown.current.set(n.runId, n);
       void window.canvasTTY.notify.show(n).then((r) => { if (!r.shown) { store.setUnavailable(); toBanner(n); } }, () => toBanner(n));
     }
-  }, [accepting, activity, autopilot, boardPlace, locale, prefs, runs, title, toBanner]);
+  }, [accepting, activity, autopilot, boardPlace, heads, locale, prefs, runs, title, toBanner]);
 
   useEffect(() => {
     const offClick = window.canvasTTY.notify.onClick((runId) => openRef.current(runId));
