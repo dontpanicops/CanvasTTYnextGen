@@ -85,6 +85,7 @@ export function useBoard(orch: Orchestration) {
     mergeAll: (workspaceId: string, project: string, language: "ru" | "en") => act(() => api.boardMergeAll(workspaceId, project, language)),
     resolve: (runId: string, confirm: boolean) => act(() => api.boardMergeResolve(runId, confirm)),
     skip: (runId: string) => act(() => api.boardMergeSkip(runId)),
+    toAgent: (runId: string, language: "ru" | "en") => act(() => api.boardMergeAgent(runId, language)),
     openMerge: (runId: string) => act(() => api.boardMergeOpen(runId)),
     head: (action: "branch" | "apply" | "new" | "update", workspaceId: string, project: string, language: "ru" | "en" = "en") => act(() => api.boardHead(action, workspaceId, project, language)),
     // C2 (decision 12): a start waiting for a place — over the limit now, or out of the queue

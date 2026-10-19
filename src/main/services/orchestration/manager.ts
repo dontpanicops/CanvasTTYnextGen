@@ -40,7 +40,7 @@ import { checkPreparedDeps, createRegistry } from "./checks.ts";
 import type { CheckRegistry, PreparedDeps } from "./checks.ts";
 import { DEFAULT_LIMITS } from "./cycle.ts";
 import type { Goal } from "./cycle.ts";
-import { MAX_JOURNAL_BYTES, MAX_LINE_BYTES, MAX_TEXT_BYTES, TERMINAL_STATUSES, canonical, isSha256, isTextRef, isUuid, needsRecovery, newerGoal, newerVersion, parseJournal, unfinishedWork } from "./journal.ts";
+import { MAX_JOURNAL_BYTES, MAX_LINE_BYTES, MAX_TEXT_BYTES, TERMINAL_STATUSES, canonical, isResolutionJournal, isSha256, isTextRef, isUuid, needsRecovery, newerGoal, newerVersion, parseJournal, unfinishedWork } from "./journal.ts";
 import type { JournalRecord, RunState, TextRef } from "./journal.ts";
 import { conditionsView, createOrchestrationService, decidedGoal, findingsView, loadConditions, possiblyStale, progressOf, runView, shownCheckKeys } from "./orchestrationService.ts";
 import type { CommandOutcome, GoalInput, RunCommand, RunHandle } from "./orchestrationService.ts";
@@ -51,7 +51,7 @@ import { BOARD_REF, applyToProject, branchCommit, branchNameOk, diffTreeNames, d
 import type { CloneDir } from "./workspace.ts";
 import { canvasFile, createCanvasStore, folderHolder } from "./canvasStore.ts";
 import type { RunMode } from "./canvasStore.ts";
-import { createBoardMerge } from "./boardMerge.ts";
+import { createBoardMerge, markersLines, mergeRequirements } from "./boardMerge.ts";
 import { createBoardStore } from "./boardStore.ts";
 import type { TaskInput } from "./boardStore.ts";
 import { boardStatuses, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, type BoardHead } from "../../../shared/taskBoard.ts";
@@ -544,6 +544,7 @@ export function createRunManager(deps: RunManagerDeps) {
       if (left) startingTasks.set(taskId, left); else startingTasks.delete(taskId);
     }
   }
+  // C3: a goal's `resolution` never comes over IPC (parseGoal takes the keys it knows): only startResolution sets it
   async function createRunFor(req: OrchestrationCreateRequest, inQueue?: OrchestrationCanvas): Promise<{ runId: string; created: boolean }> {
     notOpen();
     platformOk();
@@ -833,6 +834,7 @@ export function createRunManager(deps: RunManagerDeps) {
     const r = await board.read();
     const places = [...new Map(r.board.tasks.map((t) => [`${t.workspaceId}\0${t.project}`, { workspaceId: t.workspaceId, project: t.project }])).values()];
     const heads = await merges.heads(places).catch(() => [] as BoardHead[]);
+    if (heads.some((h) => h.merges.some((m) => m.agent?.pending))) watchResolutions();
     // C2: the starts that wait for a place, and the ones whose start from the queue was refused (until asked again)
     const queued = [...startQueue.map((q) => ({ taskId: q.taskId, linkId: q.linkId, at: q.at, busy: q.busy, limit: q.limit, failed: null })),
       ...[...queueFailed].map(([taskId, f]) => ({ taskId, linkId: f.linkId, at: f.at, busy: 0, limit: 0, failed: f.code }))];
@@ -893,6 +895,98 @@ export function createRunManager(deps: RunManagerDeps) {
       }
     })();
     return { tasks: todo.map((t) => t.key) };
+  }
+  // C3 (stage-c3-conflicts.md §2.1, §3, §6): a paused merge handed to an agent — its resolution run, a run of the
+  // project in a separate copy from the conflict as published, standing on no link (its owner the workspace), with the
+  // requirements of both sides, the project's checks and the markers' check, the profile's rights and models.
+  const RESOLUTION_LIMITS = { turns: 8, roundsPerStage: 3, runMs: 40 * 60_000 };
+  async function startResolution(mergeRunId: string, language: "ru" | "en"): Promise<{ runId: string }> {
+    notOpen();
+    platformOk();
+    const s = await merges.state(mergeRunId) ?? refuse("run_not_found", "no such merge run");
+    const unavailable = (why: string): never => refuse("merge_agent_unavailable", why);
+    if (s.goal.merge.source === "head") unavailable("an update from HEAD is the person's");
+    const profile = await profiles.get(s.goal.project);
+    if (!profile?.checks?.length) unavailable("the project has no check commands");
+    const facts = await taskFacts();
+    // a task that did not start from this head may bring conflicts of its own (stage-c-parallel.md §4.5)
+    if (facts.find((f) => f.runId === s.task.runId)?.board !== s.board) unavailable(`${s.task.key} did not start from the board's result`);
+    const conflict = s.conflicts.length > 0 || s.reason === "merge_conflict" || s.agent?.reason === "conflict";
+    const room = 16 - profile!.checks.length;
+    const markers = conflict ? markersLines(s.conflicts, room) : [];
+    if (markers === null || room < (conflict ? 1 : 0)) unavailable("the checks and the markers' check do not fit 16 commands");
+    // the requirements: the merged task's run, then the merged tasks of this head whose changes touch the paths
+    const goalOf = async (runId: string) => readRun(deps.root, runId).then(async (r) => r.state
+      ? { criteria: (JSON.parse((await readText(deps.root, runId, r.state.goal)).toString("utf8")) as { criteria?: string[] }).criteria ?? [], base: r.state.workspace?.baseline.commit ?? null }
+      : null, () => null);
+    const own = await goalOf(s.task.runId);
+    const ownPaths = own?.base ? await merges.changed(s.goal.project, own.base, s.task.commit).catch(() => [] as string[]) : [];
+    const paths = conflict ? s.conflicts : ownPaths;
+    const others: { key: string; criteria: string[]; paths: string[] }[] = [];
+    for (const m of (await merges.mergesInto(s.board, s.goal.project)).filter((x) => x.status === "completed" && x.reason !== "already" && !x.source && x.runId !== mergeRunId).reverse()) {
+      const g = await goalOf(m.task.runId);
+      if (g?.base) others.push({ key: m.task.key, criteria: g.criteria, paths: await merges.changed(s.goal.project, g.base, m.task.commit).catch(() => []) });
+    }
+    const { criteria, left } = mergeRequirements({ key: s.task.key, criteria: own?.criteria ?? [] }, others, paths, conflict, language);
+    if (!criteria.length) unavailable(`no requirements of ${s.task.key} to keep`);
+    const resolutionRunId = randomUUID();
+    const t = await merges.toAgent(mergeRunId, resolutionRunId);
+    const ru = language === "ru";
+    const lines = [
+      conflict ? (ru ? `Разрешите конфликт слияния ${s.task.key} с итогом доски в файлах: ${s.conflicts.join(", ")}.` : `Resolve the merge conflict of ${s.task.key} with the board's result in: ${s.conflicts.join(", ")}.`)
+        : (ru ? `После объединения ${s.task.key} с итогом доски падают проверки (${profile!.checks.join("; ")}). Исправьте. Падение может быть помехой другой задачи (занятый порт): если так — задайте вопрос, ничего не меняя.`
+          : `After merging ${s.task.key} into the board's result its checks fail (${profile!.checks.join("; ")}). Fix it. The failure may be another task's interference (a busy port): if so, ask a question and change nothing.`),
+      ru ? "Сохраните требования обеих сторон. Не удаляйте и не откатывайте чужие изменения. Маркеры конфликта не должны остаться. Коммиты не нужны: приложение соберёт коммит само."
+        : "Keep the requirements of both sides. Do not delete or revert the other side's changes. No conflict markers may stay. No commits: the application makes the commit.",
+      ru ? `Для проверяющего: изменения разрешения — \`git diff ${t.first}\` (автоматическое слияние). Удаление или откат изменения одной из сторон без замены — блокирующее замечание. Файлы вне конфликта, которые разрешение изменило, смотрите особо.`
+        : `For the reviewer: the resolution's changes — \`git diff ${t.first}\` (the automatic merge). Deleting or reverting a change of either side without a replacement is a blocking finding. Look closely at files out of the conflict it changed.`,
+      ...(left.length ? [ru ? `Требования ${left.join(", ")} — в их запусках.` : `The requirements of ${left.join(", ")} are in their runs.`] : [])
+    ];
+    const goal: OrchestrationGoalInput = {
+      text: lines.join("\n\n").slice(0, 8000), criteria, checks: [], commands: [...profile!.checks, ...markers!], workMode: "copy", mode: "autopilot", reviewPlan: false,
+      language, limits: RESOLUTION_LIMITS, resolution: { mergeRunId, taskId: s.task.id, key: s.task.key, base: t.base }
+    } as OrchestrationGoalInput;
+    try {
+      await createRunFor({ requestId: resolutionRunId, source: s.goal.project, goal });
+      await canvas.own(resolutionRunId, s.goal.workspaceId);
+    } catch (error) {
+      await merges.resolutionEnded(mergeRunId, resolutionRunId, { kind: "failed", detail: `start: ${(error as { code?: string }).code ?? String((error as Error)?.message ?? error).slice(0, 120)}` }).catch(() => {});
+      throw error;
+    }
+    watchResolutions();
+    return { runId: resolutionRunId };
+  }
+  // C3 (§2.3): the merges waiting for their resolution run — each run's end handed to its merge. ponytail: one timer polls
+  // them (1.5 s) while any waits, as the board's autopilot does; started at the first board read after a restart too
+  let resolutionTimer: ReturnType<typeof setInterval> | null = null;
+  let resolutionTick: Promise<void> | null = null;
+  function watchResolutions(): void {
+    if (resolutionTimer || closing) return;
+    resolutionTimer = setInterval(() => { resolutionTick ??= syncResolutions().finally(() => { resolutionTick = null; }); }, 1500);
+    resolutionTimer.unref?.();
+  }
+  async function syncResolutions(): Promise<void> {
+    const waiting = await merges.awaiting().catch(() => []);
+    if (!waiting.length) { if (resolutionTimer) clearInterval(resolutionTimer); resolutionTimer = null; return; }
+    for (const w of waiting) {
+      const snap = await result(() => snapshot(w.resolutionRunId));
+      if (!snap.ok) {
+        if (snap.code === "run_not_found") await merges.resolutionEnded(w.runId, w.resolutionRunId, { kind: "failed", detail: "failed" }).catch(() => {});
+        continue;
+      }
+      const v = snap.value.view;
+      let outcome: { kind: "completed"; tree: string } | { kind: "failed"; detail: string } | null = null;
+      if (v.status === "completed") {
+        const st = (await readRun(deps.root, w.resolutionRunId).catch(() => null))?.state;
+        const cps = st?.workspace ? Object.entries(st.workspace.checkpoints).sort((a, b) => Number(b[0]) - Number(a[0])) : [];
+        outcome = st?.completion?.kind === "confirmed" && cps.length ? { kind: "completed", tree: cps[0]![1].tree } : { kind: "failed", detail: "failed" };
+      } else if (v.status === "stopped" || v.status === "failed") outcome = { kind: "failed", detail: v.status };
+      else if (v.status === "paused" && v.reason === "limit_reached") {
+        const kind = v.progress?.budget?.reached ?? null;
+        outcome = { kind: "failed", detail: kind === "replans" ? "replan" : `limit:${kind ?? "unknown"}` };
+      }
+      if (outcome) await merges.resolutionEnded(w.runId, w.resolutionRunId, outcome).catch(() => {});
+    }
   }
   // «Accept the result» (owner's decision 2): only of the task's latest run, completed without checks by its journal
   async function acceptTask(taskId: string): Promise<BoardTask> {
@@ -1123,6 +1217,8 @@ export function createRunManager(deps: RunManagerDeps) {
     boardMergeAll: (workspaceId: string, project: string, language: "ru" | "en" = "en") => result(async () => mergeAll(workspaceId, await placeProject(project), language)),
     boardMergeResolve: (runId: string, confirm: boolean) => result(() => { notOpen(); return merges.resolve(runIdOk(runId), confirm === true); }),
     boardMergeSkip: (runId: string) => result(() => merges.skip(runIdOk(runId))),
+    // C3: «Поручить агенту» on a paused merge
+    boardMergeAgent: (runId: string, language: "ru" | "en" = "en") => result(() => startResolution(runIdOk(runId), language)),
     boardMergeDir: (runId: string) => result(() => merges.copyOf(runIdOk(runId))),
     boardHeadBranch: (workspaceId: string, project: string) => result(async () => { notOpen(); return merges.branch(workspaceId, await placeProject(project)); }),
     boardHeadApply: (workspaceId: string, project: string) => result(async () => { notOpen(); return merges.apply(workspaceId, await placeProject(project)); }),
@@ -1148,6 +1244,9 @@ export function createRunManager(deps: RunManagerDeps) {
       const out: OrchestrationRunSnapshot[] = [];
       for (const id of names.filter(isUuid).sort()) {
         if (await merges.isMerge(id)) continue; // C1: a merge run is shown on the board, not as a newer version's run
+        // C3: a resolution run too — opened from its merge on the board
+        const head = await readFile(join(deps.root, "runs", id, "journal.jsonl")).then((b) => b.subarray(0, 4096), () => null);
+        if (head && isResolutionJournal(head)) continue;
         const s = await result(() => snapshot(id));
         if (s.ok) out.push(s.value);
       }
@@ -1439,6 +1538,8 @@ export function createRunManager(deps: RunManagerDeps) {
     // writer closed. Terminal sessions and anything else of the application are not touched here.
     async shutdown(): Promise<void> {
       closing = true;
+      if (resolutionTimer) clearInterval(resolutionTimer);
+      resolutionTimer = null;
       autopilot.shutdown();
       if (queueTimer) { clearInterval(queueTimer); queueTimer = null; }
       startQueue.length = 0;

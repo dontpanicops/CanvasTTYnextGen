@@ -12,7 +12,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { findGit } from "../src/main/services/orchestration/git.ts";
-import { createBoardMerge, isLockFile } from "../src/main/services/orchestration/boardMerge.ts";
+import { createBoardMerge, isLockFile, markersLines, mergeRequirements } from "../src/main/services/orchestration/boardMerge.ts";
+import { isResolutionJournal } from "../src/main/services/orchestration/journal.ts";
+import { createRunManager, testNativeRuntime } from "../src/main/services/orchestration/manager.ts";
+import { createProfileStore, suggestProfile } from "../src/main/services/orchestration/profile.ts";
+import { AUTOPILOT_BUDGET } from "../src/shared/taskBoard.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GIT = findGit(process.env);
@@ -220,4 +224,119 @@ test("a restart while the merge waits for its resolution run: it waits on (not �
   const s = await mergeOf(again, h, dir, runId);
   assert.deepEqual([s.status, s.agent.pending], ["running", true]);
   assert.deepEqual(await again.awaiting(), [{ runId, resolutionRunId: res }]);
+});
+
+test("the requirements a resolution keeps: the application's, the merged task's, then the touching tasks' — once each, 32 at most; the markers' check lines", () => {
+  const r = mergeRequirements({ key: "T-2", criteria: ["x", "y"] }, [{ key: "T-1", criteria: ["y", "z"], paths: ["a.txt"] }, { key: "T-3", criteria: ["q"], paths: ["b.txt"] }], ["a.txt"], true);
+  assert.deepEqual(r, { criteria: ["В файлах нет маркеров конфликта: a.txt", "x", "y", "z"], left: [] });
+  // semantic: no markers' requirement
+  assert.deepEqual(mergeRequirements({ key: "T-2", criteria: ["x"] }, [], ["a.txt"], false).criteria, ["x"]);
+  // over 32: the application's and the merged task's first; a task none of whose fit is named
+  const many = Array.from({ length: 31 }, (_, i) => `t2-${i}`);
+  const big = mergeRequirements({ key: "T-2", criteria: many }, [{ key: "T-1", criteria: ["other"], paths: ["a.txt"] }], ["a.txt"], true);
+  assert.equal(big.criteria.length, 32);
+  assert.deepEqual(big.left, ["T-1"]);
+  // a long list of paths: the requirement stays within 500 characters
+  const paths = Array.from({ length: 60 }, (_, i) => `src/some/long/path/file-${i}.ts`);
+  const long = mergeRequirements({ key: "T-2", criteria: ["x"] }, [], paths, true).criteria[0];
+  assert.ok(long.length <= 500 && /и ещё \d+/.test(long), long);
+  // the markers' check: quoted paths, a file that is gone passes, a marker fails
+  const [line] = markersLines(["a.txt", "it's b.txt"], 1);
+  assert.equal(line, "! grep -sIE '^(<{7}|>{7}) ' -- 'a.txt' 'it'\\''s b.txt'");
+  const d = fs.mkdtempSync(path.join(TMP, "mk-"));
+  const run = (files) => { for (const [f, t] of Object.entries(files)) fs.writeFileSync(path.join(d, f), t); try { execFileSync("/bin/sh", ["-c", line], { cwd: d }); return 0; } catch (e) { return e.status; } };
+  assert.equal(run({ "a.txt": "one\ntwo\n" }), 0, "no markers, the other file gone");
+  assert.equal(run({ "it's b.txt": ">>>>>>> theirs\n" }), 1, "a marker");
+  assert.equal(markersLines(Array.from({ length: 200 }, (_, i) => `p/${"x".repeat(40)}-${i}`), 1), null, "does not fit one line");
+  assert.equal(markersLines(Array.from({ length: 200 }, (_, i) => `p/${"x".repeat(40)}-${i}`), 16).length > 1, true);
+});
+
+// ---------------- through the manager, fake CLIs ----------------
+const wrapper = (name, mock) => {
+  const file = path.join(TMP, name);
+  fs.writeFileSync(file, `#!/bin/sh\nexec "${NODE}" "${path.join(HERE, "fixtures", "orchestration", mock)}" "$@"\n`, { mode: 0o755 });
+  return file;
+};
+const CODEX = wrapper("codex", "mock-codex.mjs");
+const CLAUDE = wrapper("claude", "mock-claude.mjs");
+const b64 = (t) => Buffer.from(t).toString("base64");
+const taskTurns = (text) => [
+  { answer: { stages: [{ title: "fix", task: "write c.txt", conditions: [{ keep: null, text: "c.txt written", covers: ["R1"], evidence: { kind: "change", check: null } }] }], dropped: [], dropRequirements: [], question: null } },
+  { answer: { summary: "done", done: true }, writes: [{ rel: "c.txt", base64: b64(text) }] },
+  { answer: { conditions: [{ id: "C1", status: "met", paths: ["c.txt"], note: "written" }], findings: [], request: "none", question: null } },
+  { answer: { conditions: [], findings: [], request: "none", question: null, requirements: [{ id: "R1", status: "met", note: "written" }] } }
+];
+const resolutionTurns = [
+  { answer: { summary: "resolved", done: true }, writes: [{ rel: "c.txt", base64: b64("one\ntwo\n") }] },
+  { answer: { conditions: [{ id: "C1", status: "met", paths: ["c.txt"], note: "both kept" }], findings: [], request: "none", question: null } },
+  { answer: { conditions: [], findings: [], request: "none", question: null, requirements: [{ id: "R1", status: "met", note: "ok" }, { id: "R2", status: "met", note: "ok" }] } }
+];
+function scripts(...sets) {
+  const dir = path.join(TMP, `script-${++n}`);
+  sets.forEach((answers, k) => {
+    const sub = path.join(dir, String(k + 1));
+    fs.mkdirSync(sub, { recursive: true });
+    answers.forEach((a, i) => {
+      fs.writeFileSync(path.join(sub, `${i + 1}.json`), JSON.stringify(a.answer));
+      if (a.writes) fs.writeFileSync(path.join(sub, `${i + 1}.writes.json`), JSON.stringify(a.writes));
+    });
+  });
+  return dir;
+}
+function manager(script, extra = {}) {
+  const root = path.join(TMP, `root-${++n}`);
+  const file = path.join(TMP, `providers-${++n}.json`);
+  fs.mkdirSync(path.join(TMP, ".codex"), { recursive: true });
+  fs.writeFileSync(path.join(TMP, ".codex", "config.toml"), "");
+  const p = { path: `${TMP}:/usr/bin:/bin`, env: { HOME: TMP, CODEX_HOME: path.join(TMP, ".codex"), MOCK_STATE: fs.mkdtempSync(path.join(TMP, "state-")), MOCK_SCRIPT: script, MOCK_SCRIPT_PER_CWD: "1", ...extra } };
+  fs.writeFileSync(file, JSON.stringify({ codex: { executable: CODEX, version: "codex-cli 0.155.1", ...p }, claude: { executable: CLAUDE, version: "2.1.281 (Claude Code)", ...p },
+    shell: SHELL, checkEnv: { ...CHECK_ENV, HOME: TMP } }));
+  const m = createRunManager({ platform: "darwin", root, gitPath: () => GIT, launch: () => LAUNCH, nodePath: () => NODE, stopGraceMs: 2000,
+    agents: async () => { throw new Error("not used"); }, native: testNativeRuntime(file, () => LAUNCH), leadSandbox: false, journalV2: true,
+    workspaceOpen: () => true, workspaceKnown: (id) => id === "common" });
+  m.root = root;
+  return m;
+}
+const bounds = { position: { x: 0, y: 0 }, size: { width: 280, height: 160 } };
+async function linkOn(m, src) {
+  const lead = (await m.createAgent({ agentId: randomUUID(), provider: "codex", project: src, bounds })).value.agentId;
+  const exec = (await m.createAgent({ agentId: randomUUID(), provider: "claude", project: src, bounds })).value.agentId;
+  return (await m.createLink({ linkId: randomUUID(), fromAgentId: lead, toAgentId: exec })).value.linkId;
+}
+
+test("through the manager: two tasks change one line, the second's merge conflicts, «Поручить агенту» — a resolution run off the canvas, then the merge completes with both", OPTS, async () => {
+  const src = fs.realpathSync(project());
+  const m = manager(scripts(taskTurns("one\n"), taskTurns("two\n"), resolutionTurns), { MOCK_TURN_DELAY_MS: "300" });
+  await createProfileStore(m.root).save(src, { ...(await suggestProfile(src)), workMode: "copy", checks: ["test -f keep.txt"] });
+  const input = (title) => ({ workspaceId: WS, project: src, title, text: "write c.txt", criteria: ["c.txt is written"], dependsOn: [] });
+  const t1 = (await m.boardCreate(input("A"))).value;
+  const t2 = (await m.boardCreate(input("B"))).value;
+  const side = personSide(src);
+  const linkId = await linkOn(m, src);
+  assert.equal((await m.boardBudget(linkId, { ...AUTOPILOT_BUDGET, parallel: 2 })).ok, true);
+  assert.ok((await m.boardAutopilot(linkId, true, "ru")).ok);
+  const paused = await until(async () => (await m.board()).value.heads?.[0]?.merges.find((x) => x.status === "paused" && x.reason === "merge_conflict"), 120_000);
+  assert.equal(paused.task.id, [t1, t2].find((t) => t.id === paused.task.id).id);
+  assert.deepEqual(paused.conflicts, ["c.txt"]);
+  const r = await m.boardMergeAgent(paused.runId, "ru");
+  assert.ok(r.ok, JSON.stringify(r));
+  const resolution = r.value.runId;
+  // the resolution run stands on no link and is not listed with the runs
+  assert.ok(isResolutionJournal(fs.readFileSync(path.join(m.root, "runs", resolution, "journal.jsonl"))));
+  assert.ok(!(await m.list()).value.some((x) => x.view.runId === resolution));
+  assert.ok(!(await m.canvas()).value.links.some((l) => (l.runIds ?? []).includes(resolution)));
+  const done = await until(async () => (await m.board()).value.heads[0].merges.find((x) => x.runId === paused.runId && x.status === "completed"), 120_000);
+  assert.deepEqual([done.completion, done.agent.resolutionRunId, done.agent.pending], ["confirmed", resolution, false]);
+  const h = (await m.board()).value.heads[0];
+  assert.equal(g(src, "show", `${h.commit}:c.txt`), "one\ntwo");
+  // the resolution's goal: both sides' requirements, the project's check and the markers'
+  const first = JSON.parse(fs.readFileSync(path.join(m.root, "runs", resolution, "journal.jsonl"), "utf8").split("\n")[0]);
+  const goal = JSON.parse(fs.readFileSync(path.join(m.root, "runs", resolution, "texts", first.data.goal.sha256), "utf8"));
+  assert.deepEqual(goal.criteria, ["В файлах нет маркеров конфликта: c.txt", "c.txt is written"]);
+  assert.deepEqual(goal.commands, ["test -f keep.txt", "! grep -sIE '^(<{7}|>{7}) ' -- 'c.txt'"]);
+  assert.equal(goal.task, undefined);
+  assert.equal(goal.resolution.mergeRunId, paused.runId);
+  await m.boardAutopilot(linkId, false, "ru");
+  assert.deepEqual(personSide(src), side, "the person's folder untouched");
+  await m.shutdown();
 });

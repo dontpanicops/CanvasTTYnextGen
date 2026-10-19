@@ -67,6 +67,55 @@ class Refusal extends Error {
 }
 const refuse = (code: string, message: string): never => { throw new Refusal(code, message); };
 
+// C3 (stage-c3-conflicts.md §3.1): the requirements a resolution keeps — the merged task's, then those of the tasks in the
+// head whose changes touch `paths` (oldest merge first), then the application's own about the markers; one text once;
+// 32 at most (a goal's limit): the application's always, the merged task's next, the rest while there is room. left:
+// the tasks none of whose requirements fit (named in the task text instead).
+export function mergeRequirements(task: { key: string; criteria: readonly string[] }, others: readonly { key: string; criteria: readonly string[]; paths: readonly string[] }[],
+  paths: readonly string[], conflict: boolean, language: "ru" | "en" = "ru"): { criteria: string[]; left: string[] } {
+  const app: string[] = [];
+  if (conflict) {
+    const head = language === "en" ? "No conflict markers in " : "В файлах нет маркеров конфликта: ";
+    let list = "";
+    for (const [i, p] of paths.entries()) {
+      const more = paths.length - i - 1;
+      const next = (list ? `${list}, ` : "") + p;
+      const tail = more ? (language === "en" ? ` and ${more} more (listed in the task)` : ` и ещё ${more} (список — в задании)`) : "";
+      if ((head + next + tail).length > 500) { list += language === "en" ? ` and ${paths.length - i} more (listed in the task)` : ` и ещё ${paths.length - i} (список — в задании)`; break; }
+      list = next;
+    }
+    app.push(head + list);
+  }
+  const out: string[] = [...app];
+  const add = (c: string) => { if (!out.includes(c) && out.length < 32) out.push(c); };
+  for (const c of task.criteria) add(c);
+  const touch = new Set(paths);
+  const left: string[] = [];
+  for (const o of others) {
+    if (!o.paths.some((p) => touch.has(p))) continue;
+    const before = out.length;
+    for (const c of o.criteria) add(c);
+    if (out.length === before && o.criteria.some((c) => !out.includes(c))) left.push(o.key);
+  }
+  return { criteria: out, left };
+}
+
+// C3 (§4): the markers' check of a resolution run — fails while a conflict file holds a marker line; a file that is gone
+// (a modify/delete conflict resolved by deleting) passes. Each line within 1000 characters; null: they do not fit `room`.
+export function markersLines(paths: readonly string[], room: number): string[] | null {
+  const q = (p: string) => `'${p.replace(/'/g, "'\\''")}'`;
+  const head = "! grep -sIE '^(<{7}|>{7}) ' --";
+  const lines: string[] = [];
+  let line = head;
+  for (const p of paths) {
+    if (head.length + 1 + q(p).length > 1000) return null;
+    if (line.length + 1 + q(p).length > 1000) { lines.push(line); line = head; }
+    line += ` ${q(p)}`;
+  }
+  if (line !== head) lines.push(line);
+  return lines.length <= room ? lines : null;
+}
+
 export function createBoardMerge(deps: BoardMergeDeps) {
   const queues = new Map<string, Promise<unknown>>();
   const working = new Set<string>(); // merge runs this process drives now

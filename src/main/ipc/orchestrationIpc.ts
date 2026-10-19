@@ -431,6 +431,7 @@ export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager
     return [uuid(runId, "runId"), confirm as boolean] as [string, boolean];
   }, manager.boardMergeResolve));
   handleMain(IPC.orchestrationBoardMergeSkip, (_e, runId: unknown) => checked(() => [uuid(runId, "runId")] as [string], manager.boardMergeSkip));
+  handleMain(IPC.orchestrationBoardMergeAgent, (_e, runId: unknown, language: unknown) => checked(() => [uuid(runId, "runId"), lang(language)] as [string, "ru" | "en"], manager.boardMergeAgent));
   // the merge copy of this run only, by the path its journal holds (never a path from the renderer)
   handleMain(IPC.orchestrationBoardMergeOpen, (_e, runId: unknown) => checked(() => [uuid(runId, "runId")] as [string], async (id: string) => {
     const dir = await manager.boardMergeDir(id);
