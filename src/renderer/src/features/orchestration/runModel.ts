@@ -494,9 +494,21 @@ export function nextStepKey(view: OrchestrationRunView, entries: readonly Orches
   return step !== null && APP_FAILURE_STEPS.includes(step) ? "app_failure" : runHeadline(view).next;
 }
 
-export function providerLimit(view: OrchestrationRunView, entries: readonly OrchestrationActivityEntry[]): { provider: string; resetsAt: string | null } | null {
+export function providerLimit(view: OrchestrationRunView, entries: readonly OrchestrationActivityEntry[]): { provider: string; resetsAt: string | null; resetsAtMs: number | null } | null {
   const cause = viewCause(view, entries);
-  return cause?.kind === "provider_limit" ? { provider: cause.provider, resetsAt: cause.resetsAt } : null;
+  return cause?.kind === "provider_limit" ? { provider: cause.provider, resetsAt: cause.resetsAt, resetsAtMs: cause.resetsAtMs } : null;
+}
+
+// C4 (stage-c4-limits.md §5): a reset time in the Mac's local time — today «15:00», tomorrow «завтра 15:00», later
+// «24 окт. 15:00»
+export function resetTime(locale: LocaleId, at: number, now = Date.now()): string {
+  const lang = locale === "ru" ? "ru-RU" : "en-US";
+  const time = new Intl.DateTimeFormat(lang, { hour: "numeric", minute: "2-digit" }).format(at);
+  const day = (ms: number) => { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+  const days = Math.round((day(at) - day(now)) / 86_400_000);
+  if (days <= 0) return time;
+  if (days === 1) return `${t(locale, "orchResetTomorrow")} ${time}`;
+  return `${new Intl.DateTimeFormat(lang, { day: "numeric", month: "short" }).format(at)}, ${time}`;
 }
 
 // UX audit PR 3: a completed run whose next step is the «Changes» tab has that as its main button; «New goal» second.
@@ -508,8 +520,9 @@ export const changesFirst = (view: OrchestrationRunView, entries: readonly Orche
 export function nextStepText(locale: LocaleId, view: OrchestrationRunView, entries: readonly OrchestrationActivityEntry[]): string {
   const limit = providerLimit(view, entries);
   if (limit) {
-    return t(locale, limit.resetsAt ? "orchNext_provider_limit_at" : "orchNext_provider_limit")
-      .replaceAll("{provider}", providerName(limit.provider)).replace("{at}", limit.resetsAt ?? "");
+    const at = limit.resetsAt ?? (limit.resetsAtMs !== null ? resetTime(locale, limit.resetsAtMs) : null);
+    return t(locale, at ? "orchNext_provider_limit_at" : "orchNext_provider_limit")
+      .replaceAll("{provider}", providerName(limit.provider)).replace("{at}", at ?? "");
   }
   const cause = viewCause(view, entries);
   if (cause?.kind === "prepare") return t(locale, "orchNext_prepare_failed").replace("{command}", cause.command ?? "?");

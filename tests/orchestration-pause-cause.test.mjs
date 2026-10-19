@@ -62,7 +62,7 @@ function panel(tab) {
 const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
 test("a Codex usage limit: the same reason and headline in the panel, the activity rows and the agent cards", () => {
-  assert.deepEqual(viewCause(view, entries), { kind: "provider_limit", reason: "environment_error", provider: "codex", resetsAt: "Sep 28th, 2026 11:51 PM" });
+  assert.deepEqual(viewCause(view, entries), { kind: "provider_limit", reason: "environment_error", provider: "codex", resetsAt: "Sep 28th, 2026 11:51 PM", resetsAtMs: null });
   assert.equal(causeText(LOCALE, viewCause(view, entries)), REASON);
 
   const input = { view, entries, open: true, stageTitles: null, now: Date.parse("2026-09-26T05:31:00Z") };

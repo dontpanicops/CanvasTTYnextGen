@@ -203,6 +203,7 @@ export interface TurnResult {
     droppedDiagnostics: number;
   };
   history: Frame[];
+  limit?: import("./providerLimit.ts").ProviderLimitSignal | null; // C4: a provider's usage limit seen in the turn's frames
   terminal: { type: string; index: number; at: number } | null;
   errors: Frame[];
   stderr: { head: string; tail: string; bytes: number; droppedBytes: number };

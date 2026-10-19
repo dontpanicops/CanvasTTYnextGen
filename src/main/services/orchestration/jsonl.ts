@@ -3,6 +3,7 @@
 // fatal TextDecoder; never truncate before JSON.parse.
 import { constants } from "node:os";
 import type { EventFrame, Frame, OrchestrationProvider, TransportStatus } from "./types.ts";
+import { noteLimit, type ProviderLimitSignal } from "./providerLimit.ts";
 
 export interface FramerLimits {
   maxMessageBytes: number; // one line, without '\n'
@@ -195,6 +196,7 @@ export class TurnCollector {
   sessionId: string | null = null; // codex thread.started.thread_id; claude system/init.session_id
   sessionConflict = false; // a later id (codex thread.started, claude init/result) differs from sessionId
   sessionEvent: Record<string, unknown> | null = null; // the event that gave sessionId, kept whatever the history limits
+  limit: ProviderLimitSignal | null = null; // C4: a provider's usage limit, from every frame whatever the history limits
 
   private historyFull = false; // once an event is dropped, later ones are too: history is a prefix, no gaps
   private readonly provider: OrchestrationProvider;
@@ -221,6 +223,7 @@ export class TurnCollector {
     const t = this.session ? (this.terminals.length ? null : this.session.terminal(f)) : terminalOf(this.provider, f);
     if (t && this.terminals.length < 2) this.terminals.push({ type: f.type, index, at, result: t, value: f.value });
     this.noteSession(f);
+    this.limit = noteLimit(this.limit, this.provider, f);
     this.historyFull ||= this.events.length >= this.limits.maxEvents || this.historyBytes + f.bytes > (this.limits.maxHistoryBytes ?? Infinity);
     if (!this.historyFull) {
       this.events.push(f);

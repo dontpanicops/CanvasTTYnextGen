@@ -13,7 +13,9 @@ import type { OrchestrationActivityEntry, OrchestrationRunView } from "./orchest
 // - ending: the step that ended the turn (TurnResult.ending, kept as detail.endStep of its turn_finished entry).
 // - reason: main's reason as it is.
 export type PauseCause =
-  | { kind: "provider_limit"; reason: string; provider: string; resetsAt: string | null }
+  // resetsAt: the CLI's own words (older runs); resetsAtMs: the reset main recognised in the turn's frames (C4, null:
+  // unknown — and always null on a run from before C4)
+  | { kind: "provider_limit"; reason: string; provider: string; resetsAt: string | null; resetsAtMs: number | null }
   | { kind: "model_unsupported"; reason: string; provider: string; model: string }
   | { kind: "prepare"; reason: string; command: string | null } // the environment preparation failed (its last record)
   | { kind: "ending"; reason: string; step: string }
@@ -30,8 +32,15 @@ export function pauseCause(reason: string, turnId: string | null, entries: reado
   const mapped = finished.text === "invalid_report" ? "invalid_report"
     : finished.text === "protocol_error" || finished.text === "contract_violation" ? "protocol_error" : "environment_error";
   if (mapped !== reason) return { kind: "reason", reason };
+  // C4 (stage-c4-limits.md §1.2): main's own record of the limit first; the Codex message for runs from before it
+  const known = reason === "environment_error" ? turn.find((e) => e.kind === "error" && typeof e.detail?.limitProvider === "string") : undefined;
   const limit = reason === "environment_error" ? turn.find((e) => e.kind === "error" && USAGE_LIMIT.test(e.text)) : undefined;
-  if (limit) return { kind: "provider_limit", reason, provider: limit.provider ?? finished.provider ?? "provider", resetsAt: /try again at (.+?)\.?\s*$/i.exec(limit.text)?.[1] ?? null };
+  const words = limit ? /try again at (.+?)\.?\s*$/i.exec(limit.text)?.[1] ?? null : null; // the CLI's own, when it said them
+  if (known) {
+    const at = typeof known.detail?.limitResetsAt === "string" ? Date.parse(known.detail.limitResetsAt) : Number.NaN;
+    return { kind: "provider_limit", reason, provider: String(known.detail!.limitProvider), resetsAt: words, resetsAtMs: Number.isFinite(at) ? at : null };
+  }
+  if (limit) return { kind: "provider_limit", reason, provider: limit.provider ?? finished.provider ?? "provider", resetsAt: words, resetsAtMs: null };
   const model = reason === "environment_error" ? turn.map((e) => (e.kind === "error" ? MODEL_UNSUPPORTED.exec(e.text)?.[1] : undefined)).find(Boolean) : undefined;
   if (model) return { kind: "model_unsupported", reason, provider: "codex", model };
   const step = finished.detail?.endStep;

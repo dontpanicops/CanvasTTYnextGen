@@ -69,7 +69,7 @@ test("Codex usage limit: paused as before, the next step names Codex and its res
   const m = manager({ MOCK_MODE: "usage_limit" });
   const { view, entries } = await pausedRun(m, {});
   assert.equal(view.reason, "environment_error", "the journal is unchanged (v1)");
-  assert.deepEqual(providerLimit(view, entries), { provider: "codex", resetsAt: "Sep 28th, 2026 11:51 PM" });
+  assert.deepEqual(providerLimit(view, entries), { provider: "codex", resetsAt: "Sep 28th, 2026 11:51 PM", resetsAtMs: null });
   const en = nextStepText("en", view, entries);
   const ru = nextStepText("ru", view, entries);
   assert.match(en, /Codex/);

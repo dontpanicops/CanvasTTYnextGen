@@ -159,6 +159,8 @@ export interface RunTaskFacts {
   newer: boolean; // a newer version's journal: read only
   halted: boolean; // running, but stopped by a condition in main (the view's halted)
   limit: string | null; // the limit a limit_reached pause stopped at (view.progress.budget.reached)
+  // C4 (stage-c4-limits.md §1.3): a pause that is a provider's usage limit, with its reset (ms; null: unknown)
+  providerLimit?: { provider: string; resetsAt: number | null } | null;
   completion: "confirmed" | "no_checks" | null;
   phase: "work" | "review"; // the active turn's, else the last turn's (no column flickers between turns)
   permission: boolean; // a permission request waits for the person

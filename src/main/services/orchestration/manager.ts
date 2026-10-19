@@ -56,7 +56,8 @@ import { createBoardStore } from "./boardStore.ts";
 import type { TaskInput } from "./boardStore.ts";
 import { boardStatuses, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, type BoardHead } from "../../../shared/taskBoard.ts";
 import { AUTOPILOT_BUDGET, baseOf, type AutopilotBudget, type BoardPlace, type BoardTask, type BoardView, type RunTaskFacts } from "../../../shared/taskBoard.ts";
-import type { OrchestrationTurnPurpose, OrchestrationWorkMode } from "../../../shared/orchestration.ts";
+import type { OrchestrationRunView, OrchestrationTurnPurpose, OrchestrationWorkMode } from "../../../shared/orchestration.ts";
+import { viewCause } from "../../../shared/orchestrationPause.ts";
 import { runOwners, workspaceOf } from "../../../shared/workspaceOwnership.ts";
 import { createBoardAutopilot } from "./boardAutopilot.ts";
 import { COMMON_WORKSPACE_ID } from "../../../shared/contracts.ts";
@@ -759,6 +760,11 @@ export function createRunManager(deps: RunManagerDeps) {
     if (g) goalMeta.set(runId, meta); // a goal text not readable yet (a run being created) is asked again next time
     return meta;
   }
+  // C4 (stage-c4-limits.md §1.3): the pause read by the window's rules from the run's feed; no record — no limit known
+  async function providerLimitOf(runId: string, view: OrchestrationRunView): Promise<RunTaskFacts["providerLimit"]> {
+    const cause = viewCause(view, await activityLog.tail(runId, 400).catch(() => []));
+    return cause?.kind === "provider_limit" ? { provider: cause.provider, resetsAt: cause.resetsAtMs } : null;
+  }
   async function runTaskFacts(runId: string, owner: (runId: string) => string): Promise<RunTaskFacts> {
     const dir = join(deps.root, "runs", runId);
     const stamp = await Promise.all([stat(join(dir, "journal.jsonl")), stat(join(dir, "workspace", "taken.json"))].map((p) => p.then((s) => `${s.size}:${s.mtimeMs}`, () => "-"))).then((a) => a.join("|"));
@@ -792,7 +798,8 @@ export function createRunManager(deps: RunManagerDeps) {
           runId, ...meta, workspaceId, status: view.status, reason: view.reason, newer: !!view.newer, halted: !!view.halted,
           limit: view.progress?.budget?.reached ?? null, completion: view.progress?.completion ?? null,
           phase: runPhase(view, (last?.purpose as OrchestrationTurnPurpose | undefined) ?? null),
-          permission: !!view.permission, workMode, taken, ...(st && isCopy(workMode) ? await touched(runId, st) : {})
+          permission: !!view.permission, workMode, taken, ...(st && isCopy(workMode) ? await touched(runId, st) : {}),
+          ...(view.status === "paused" && view.reason === "environment_error" ? { providerLimit: await providerLimitOf(runId, view) } : {})
         };
       }
     }
