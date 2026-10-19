@@ -70,6 +70,7 @@ export function createOrchestrationClient(ipc: OrchestrationIpc, platform: strin
     boardMergeResolve: (runId, confirm) => ipc.invoke(IPC.orchestrationBoardMergeResolve, runId, confirm),
     boardMergeSkip: (runId) => ipc.invoke(IPC.orchestrationBoardMergeSkip, runId),
     boardMergeAgent: (runId, language) => ipc.invoke(IPC.orchestrationBoardMergeAgent, runId, language),
+    boardDecompose: (taskId, language) => ipc.invoke(IPC.orchestrationBoardDecompose, taskId, language),
     boardMergeOpen: (runId) => ipc.invoke(IPC.orchestrationBoardMergeOpen, runId),
     boardHead: (action, workspaceId, project, language) => ipc.invoke(IPC.orchestrationBoardHead, action, workspaceId, project, language ?? "en"),
     boardQueue: (action, taskId) => ipc.invoke(IPC.orchestrationBoardQueue, action, taskId),

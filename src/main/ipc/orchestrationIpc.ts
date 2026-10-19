@@ -379,20 +379,23 @@ export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager
   // B1: the task board — every argument checked here, every rule of the board in main (boardStore)
   handleMain(IPC.orchestrationBoard, () => checked(() => [] as [], manager.board));
   handleMain(IPC.orchestrationBoardCreate, (_e, input: unknown) => checked(() => {
-    const o = obj(input, "task", ["workspaceId", "project", "title", "text", "criteria"], ["dependsOn"]);
+    const o = obj(input, "task", ["workspaceId", "project", "title", "text", "criteria"], ["dependsOn", "decompose"]);
+    if (o.decompose !== undefined && typeof o.decompose !== "boolean") bad("task.decompose must be a boolean");
     return [{
       workspaceId: str(o.workspaceId, "task.workspaceId", 64), project: absolute(o.project, "task.project"), title: str(o.title, "task.title", 200),
       text: str(o.text, "task.text", 8000), criteria: strings(o.criteria, "task.criteria", 32, 500),
-      ...(o.dependsOn !== undefined ? { dependsOn: uuids(o.dependsOn, "task.dependsOn") } : {})
+      ...(o.dependsOn !== undefined ? { dependsOn: uuids(o.dependsOn, "task.dependsOn") } : {}), ...(o.decompose !== undefined ? { decompose: o.decompose as boolean } : {})
     }] as [BoardTaskInput];
   }, manager.boardCreate));
   handleMain(IPC.orchestrationBoardUpdate, (_e, id: unknown, patch: unknown) => checked(() => {
-    const o = obj(patch, "patch", [], ["title", "text", "criteria", "dependsOn", "order"]);
+    const o = obj(patch, "patch", [], ["title", "text", "criteria", "dependsOn", "order", "decompose"]);
+    if (o.decompose !== undefined && typeof o.decompose !== "boolean") bad("patch.decompose must be a boolean");
     if (o.order !== undefined && (typeof o.order !== "number" || !Number.isFinite(o.order))) bad("patch.order must be a number");
     return [uuid(id, "id"), {
       ...(o.title !== undefined ? { title: str(o.title, "patch.title", 200) } : {}), ...(o.text !== undefined ? { text: str(o.text, "patch.text", 8000) } : {}),
       ...(o.criteria !== undefined ? { criteria: strings(o.criteria, "patch.criteria", 32, 500) } : {}),
-      ...(o.dependsOn !== undefined ? { dependsOn: uuids(o.dependsOn, "patch.dependsOn") } : {}), ...(o.order !== undefined ? { order: o.order as number } : {})
+      ...(o.dependsOn !== undefined ? { dependsOn: uuids(o.dependsOn, "patch.dependsOn") } : {}), ...(o.order !== undefined ? { order: o.order as number } : {}),
+      ...(o.decompose !== undefined ? { decompose: o.decompose as boolean } : {})
     }] as [string, BoardTaskPatch];
   }, manager.boardUpdate));
   handleMain(IPC.orchestrationBoardArchive, (_e, id: unknown, archived: unknown) => checked(() => {
@@ -433,6 +436,8 @@ export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager
     return [uuid(runId, "runId"), confirm as boolean] as [string, boolean];
   }, manager.boardMergeResolve));
   handleMain(IPC.orchestrationBoardMergeSkip, (_e, runId: unknown) => checked(() => [uuid(runId, "runId")] as [string], manager.boardMergeSkip));
+  // E2: the decomposition run of a parent
+  handleMain(IPC.orchestrationBoardDecompose, (_e, taskId: unknown, language: unknown) => checked(() => [uuid(taskId, "taskId"), lang(language)] as [string, "ru" | "en"], manager.boardDecompose));
   handleMain(IPC.orchestrationBoardMergeAgent, (_e, runId: unknown, language: unknown) => checked(() => [uuid(runId, "runId"), lang(language)] as [string, "ru" | "en"], manager.boardMergeAgent));
   // the merge copy of this run only, by the path its journal holds (never a path from the renderer)
   handleMain(IPC.orchestrationBoardMergeOpen, (_e, runId: unknown) => checked(() => [uuid(runId, "runId")] as [string], async (id: string) => {

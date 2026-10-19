@@ -634,6 +634,8 @@ export interface OrchestrationApi {
   boardMergeSkip(runId: string): Promise<OrchestrationResult<void>>;
   // C3: «Поручить агенту» — the paused merge handed to an agent; its resolution run
   boardMergeAgent(runId: string, language: "ru" | "en"): Promise<OrchestrationResult<{ runId: string }>>;
+  // E2 (stage-e-decomposition.md §3.4): «Разбить» — the decomposition run of a task marked «Split into subtasks»
+  boardDecompose(taskId: string, language: "ru" | "en"): Promise<OrchestrationResult<{ runId: string }>>;
   boardMergeOpen(runId: string): Promise<OrchestrationResult<null>>;
   // C2 (owner's decision 13): «update» — «Обновить итог от текущего HEAD» (a merge run, as a task's)
   boardHead(action: "branch" | "apply" | "new" | "update", workspaceId: string, project: string, language?: "ru" | "en"): Promise<OrchestrationResult<

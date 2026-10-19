@@ -22,6 +22,11 @@ export interface BoardTask {
   // only while that run is the task's latest and its journal says completed / no_checks (taskStatus checks both), so
   // editing the file can never make a confirmed «Done», nor «accepted» of another run.
   accepted: { runId: string; at: string } | null;
+  // E2 (stage-e-decomposition.md §2): kept only when set; a stored `decompose` is `true`, never `false`
+  decompose?: true; // the person marked «Split into subtasks»
+  decomposedBy?: string; // a parent: the decomposition run its subtasks were made by (written by the same write as they are)
+  parentId?: string; // a subtask: its parent (same workspace and folder)
+  covers?: string[]; // a subtask: the parent's requirements it covers, "R1".."R32"
 }
 
 export interface BoardTaskInput {
@@ -31,8 +36,9 @@ export interface BoardTaskInput {
   text: string;
   criteria: string[];
   dependsOn?: string[];
+  decompose?: boolean; // E2: false (patch) — «Do it whole»; on a create/update only true is stored
 }
-export type BoardTaskPatch = Partial<Pick<BoardTaskInput, "title" | "text" | "criteria" | "dependsOn">> & { order?: number };
+export type BoardTaskPatch = Partial<Pick<BoardTaskInput, "title" | "text" | "criteria" | "dependsOn" | "decompose">> & { order?: number };
 
 // What main gives the renderer: the board as stored (readOnly: a newer version's file, or a damaged one that could not
 // be set aside) and the facts of the runs that name a task.
@@ -194,12 +200,20 @@ export interface RunTaskFacts {
   board?: string | null; // C1: the board head ref its copy started from (goal.base.branch), else null
   files?: string[]; // C2 (§4.7): the paths its work changed, from its base to its last checkpoint (a copy or a worktree)
   named?: string[]; // C2 (§4.7): the paths its goal and the lead's plan name
+  // E2 (stage-e-decomposition.md §2.1, §7): a decomposition run names its parent here (taskId stays null: it is no task run);
+  // split — its completion kind (kept out of `completion`, which stays the task runs'); splitFailed — the §5.1 code main
+  // could not create the subtasks with
+  decompositionOf?: string | null;
+  split?: "proposed" | "whole" | "rejected" | null;
+  splitFailed?: string | null;
 }
 
 export type TaskColumn = "queue" | "work" | "review" | "done";
 export type TaskReason =
   | "run_unreadable" | "waits_permission" | "waits_answer" | "waits_decision" | "limit_reached" | "waits_task"
-  | "waits_result" | "waits_merge" | "waits_head" | "last_stopped" | "last_failed" | "no_checks" | "stopping" | "run_newer" | "paused_other";
+  | "waits_result" | "waits_merge" | "waits_head" | "last_stopped" | "last_failed" | "no_checks" | "stopping" | "run_newer" | "paused_other"
+  // E2 (stage-e-decomposition.md §2.1): a parent task
+  | "decomposing" | "decomposition_paused" | "decomposition_failed" | "subtasks_gone";
 
 export interface TaskStatus {
   column: TaskColumn;
@@ -219,6 +233,8 @@ export interface TaskStatus {
   // «Done» when this task's run started, then lost it), «not_ready» (it was not: this task was started anyway). It goes
   // on to the tasks after it. Recomputing a result is stage D.
   depsNote: null | "changed" | "not_ready";
+  // E2 (§2.1): the decomposition run the status shows, and its detail (a pause reason, whole, rejected / failed / stopped, a §5.1 code)
+  split?: { runId: string; detail: string | null } | null;
 }
 
 const REVIEW_PURPOSES: readonly OrchestrationTurnPurpose[] = ["review", "final_review"];
@@ -241,13 +257,23 @@ const isDone = (s: TaskStatus | undefined) => !!s?.done;
 // the tasks on a cycle (a hand-edited board.json) are found first; one not started waits («waits_task», cycle), and
 // nothing loops. A run counts for a task of its own workspace only.
 // heads (C2): the board's merged heads — a task of a place that has one waits for its dependencies there (decision 9)
+// E2 (stage-e-decomposition.md §2.2): an archived subtask does not hold its parent; an ordinary dependency, archived,
+// still does (stage B). d: the dependency as the board has it (undefined: not there, holds nothing).
+export const holds = (t: Pick<BoardTask, "id">, d: Pick<BoardTask, "archivedAt" | "parentId"> | undefined): boolean => !!d && !(d.archivedAt && d.parentId === t.id);
+// the dependencies of t that hold it (and exist)
+export const heldDeps = (t: Pick<BoardTask, "id" | "dependsOn">, tasks: readonly BoardTask[]): string[] =>
+  t.dependsOn.filter((d) => holds(t, tasks.find((x) => x.id === d)));
+
 export function boardStatuses(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], heads: readonly BoardHead[] = []): Map<string, TaskStatus> {
   const byId = new Map(board.tasks.map((t) => [t.id, t]));
-  const depsOf = (t: BoardTask) => t.dependsOn.filter((d) => byId.has(d));
+  const depsOf = (t: BoardTask) => t.dependsOn.filter((d) => holds(t, byId.get(d)));
   const runsOf = new Map<string, RunTaskFacts[]>();
+  const splitsOf = new Map<string, RunTaskFacts[]>(); // E2: the decomposition runs of a parent
   for (const f of facts) {
     const t = f.taskId ? byId.get(f.taskId) : undefined;
     if (t && f.workspaceId === t.workspaceId) runsOf.set(t.id, [...(runsOf.get(t.id) ?? []), f]);
+    const p = f.decompositionOf ? byId.get(f.decompositionOf) : undefined;
+    if (p && f.workspaceId === p.workspaceId) splitsOf.set(p.id, [...(splitsOf.get(p.id) ?? []), f]);
   }
   // ponytail: a search from each task, O(n·(n+e)); the board holds at most 2000 tasks of a few dependencies each
   const onCycle = new Set<string>();
@@ -277,11 +303,43 @@ export function boardStatuses(board: Pick<Board, "tasks">, facts: readonly RunTa
     if (s.done && !onCycle.has(id)) s = { ...s, depsNote: noteOf(task, s, depsOf(task).map((d) => [byId.get(d)!, statusOf(d)] as const), runsOf) };
     // the queue shows what it waits for; a task at work or in review keeps its run's reason
     else if (depsWait && s.column === "queue" && s.reason !== "run_newer") s = { ...s, reason: depsWait.reason, waitsFor: depsWait.waitsFor, cycle: depsWait.cycle };
+    if (task.decompose && s.attempts === 0) s = parentStatus(task, s, splitsOf.get(id) ?? [], board.tasks);
     out.set(id, s);
     return s;
   };
   for (const t of board.tasks) statusOf(t.id);
   return out;
+}
+
+// E2 (stage-e-decomposition.md §2.1): a parent task with no run of its own, by its decomposition runs and its subtasks.
+// The table's rows; a task with subtasks is an ordinary task waiting for its dependencies (rows of the table: as now).
+function parentStatus(task: BoardTask, s: TaskStatus, splits: readonly RunTaskFacts[], tasks: readonly BoardTask[]): TaskStatus {
+  const by = (f: RunTaskFacts, over: Partial<TaskStatus>): TaskStatus => ({ ...s, waitsFor: [], cycle: false, ...over, split: { runId: f.runId, detail: null, ...(over.split ?? {}) } });
+  const subs = tasks.some((x) => x.parentId === task.id && !x.archivedAt);
+  // the run the subtasks were made by is over; a later one (the person's «Split again») decides
+  const later = splits.filter((f) => f.runId !== task.decomposedBy);
+  const latest = [...later].sort((a, b) => a.createdAt - b.createdAt || a.runId.localeCompare(b.runId)).at(-1);
+  if (task.decomposedBy) {
+    if (subs) return s;
+    if (!latest) return { ...s, column: "review", reason: "subtasks_gone", waitsFor: [], cycle: false };
+  } else if (!latest) return s;
+  const f = latest!;
+  const failed = (detail: string): TaskStatus => by(f, { column: "review", reason: "decomposition_failed", split: { runId: f.runId, detail } });
+  if (f.newer) return by(f, { column: "queue", reason: "run_newer" });
+  if (f.status === "unreadable") return by(f, { column: "queue", reason: "run_unreadable" });
+  if (f.permission) return by(f, { column: "work", reason: "waits_permission" });
+  switch (f.status) {
+    case "paused":
+      return f.reason === "awaiting_answer" ? by(f, { column: "work", reason: "waits_answer" })
+        : by(f, { column: "work", reason: "decomposition_paused", split: { runId: f.runId, detail: f.reason ?? "unknown" } });
+    case "completed":
+      if (f.split === "whole") return { ...s, split: { runId: f.runId, detail: "whole" } };
+      if (f.split === "proposed") return f.splitFailed ? failed(f.splitFailed) : by(f, { column: "work", reason: "decomposing" });
+      return failed(f.split === "rejected" ? "rejected" : "failed");
+    case "failed": return failed("failed");
+    case "stopped": return failed("stopped");
+    default: return by(f, { column: "work", reason: "decomposing" }); // preparing, running, pausing, stopping
+  }
 }
 
 // A task by its own runs only.
@@ -372,24 +430,28 @@ function resultOf(run: RunTaskFacts | undefined): "folder" | "branch" | "none" {
 // whose result is in the working folder (it worked there, or was applied) may not be in the head: then B's base (the
 // folder, or a dependency's branch). ponytail: a folder result from before the head started is in it too; told apart
 // only by «Начать новый итог доски»
-export function startBase(task: Pick<BoardTask, "dependsOn" | "workspaceId" | "project">, board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>,
+export function startBase(task: Pick<BoardTask, "id" | "dependsOn" | "workspaceId" | "project">, board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>,
   facts: readonly RunTaskFacts[], heads: readonly BoardHead[]): { branch: string; commit: string; key: string } | null {
   const head = heads.find((h) => h.workspaceId === task.workspaceId && h.project === task.project);
-  const inFolder = task.dependsOn.some((id) => resultOf(facts.find((f) => f.runId === statuses.get(id)?.current)) === "folder" && statuses.get(id)?.done);
+  const inFolder = heldDeps(task, board.tasks).some((id) => resultOf(facts.find((f) => f.runId === statuses.get(id)?.current)) === "folder" && statuses.get(id)?.done);
   return head && !inFolder ? { branch: head.ref, commit: head.commit, key: "T-0" } : baseOf(task, board, statuses, facts);
 }
 
 // B4 (owner's decision 11): what a task's separate copy starts from — the working folder (null), or the one dependency
 // result that is in a branch only. Asked only of a task without a reason (all dependencies «Done», nothing to merge).
-export function baseOf(task: Pick<BoardTask, "dependsOn">, board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>,
+export function baseOf(task: Pick<BoardTask, "id" | "dependsOn">, board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>,
   facts: readonly RunTaskFacts[]): { branch: string; commit: string; key: string } | null {
-  for (const id of task.dependsOn) {
+  for (const id of heldDeps(task, board.tasks)) {
     const dep = board.tasks.find((t) => t.id === id);
     const run = facts.find((f) => f.runId === statuses.get(id)?.current);
     if (dep && run && resultOf(run) === "branch") return { branch: run.taken!.branch!, commit: run.taken!.commit!, key: dep.key };
   }
   return null;
 }
+
+// E2 (stage-e-decomposition.md §7, until E3's decompose step): a parent marked «Split» that is not split is not run whole
+// by the autopilot — unless the lead answered «whole»
+const notYetSplit = (t: BoardTask, s: TaskStatus): boolean => !!t.decompose && !t.decomposedBy && s.split?.detail !== "whole";
 
 // B4 (§5.1): the board's autopilot takes, of the tasks of the link's workspace and the lead's folder, not archived, in
 // the queue without a reason and never tried (a retry after stopped or failed is the person's), the first by order.
@@ -398,7 +460,7 @@ export function nextTask(board: Pick<Board, "tasks">, statuses: ReadonlyMap<stri
     const s = statuses.get(t.id);
     // a dependency «Done» on a shaky base (its own dependency changed, or it was started anyway) is the person's call
     return t.workspaceId === at.workspaceId && t.project === at.project && !t.archivedAt && s?.column === "queue" && s.reason === null && s.attempts === 0
-      && !t.dependsOn.some((d) => statuses.get(d)?.depsNote);
+      && !heldDeps(t, board.tasks).some((d) => statuses.get(d)?.depsNote) && !notYetSplit(t, s);
   }).sort((a, b) => a.order - b.order)[0] ?? null;
 }
 
@@ -433,16 +495,57 @@ export function profileGoal(profile: Pick<OrchestrationProjectProfile, "checks" 
 
 // The goal of a task's start by the autopilot: the task's text and requirements, the settings as they are, in the
 // autopilot mode, from the base its dependency left (owner's decision 11).
-export function goalFor(task: Pick<BoardTask, "id" | "key" | "text" | "criteria">, profile: Pick<OrchestrationProjectProfile, "checks" | "workMode" | "finish" | "models">,
-  opts: { optionalChecks: boolean; language: "ru" | "en"; base: OrchestrationBaseRef | null }): OrchestrationGoalInput {
+export function goalFor(task: Pick<BoardTask, "id" | "key" | "text" | "criteria" | "decompose" | "decomposedBy">, profile: Pick<OrchestrationProjectProfile, "checks" | "workMode" | "finish" | "models">,
+  opts: { optionalChecks: boolean; language: "ru" | "en"; base: OrchestrationBaseRef | null; tasks?: readonly BoardTask[] }): OrchestrationGoalInput {
   const p = profileGoal(profile);
   const finish = p.workMode !== "copy" && p.finish.commit ? { finish: p.finish } : {};
   return {
     ...(opts.optionalChecks ? { models: p.models } : {}),
-    text: task.text, criteria: [...task.criteria], checks: [], commands: p.commands, workMode: p.workMode, mode: "autopilot", reviewPlan: false,
+    text: taskText(task, opts.tasks ?? [], opts.language), criteria: [...task.criteria], checks: [], commands: p.commands, workMode: p.workMode, mode: "autopilot", reviewPlan: false,
     language: opts.language, task: { id: task.id, key: task.key }, ...finish, limits: {},
     ...(opts.base && (p.workMode === "copy" || p.workMode === "worktree") ? { base: opts.base } : {})
   };
+}
+
+// E2 (stage-e-decomposition.md §6): the texts the application adds. Task text is 8000 at most (checkGoal).
+export const TASK_TEXT_MAX = 8000;
+export const SPLIT_TEXT_MAX = 7600; // a task marked «Split» leaves 400 for the closing run's paragraph
+const SUBTASKS_PARAGRAPH_MAX = 400;
+
+// A subtask's text: the lead's text and, after it, the requirements of the parent it covers — verbatim while all fits in
+// 8000, the rest cut with «…» (every R number stays). Context for the run, not its requirements: it is accepted by its own.
+export function subtaskText(leadText: string, parent: Pick<BoardTask, "key" | "title" | "criteria">, covers: readonly string[], language: "ru" | "en"): string {
+  const head = `${leadText}\n\n${language === "ru" ? `Часть задачи ${parent.key} «${parent.title}». Закрывает её требования:` : `Part of task ${parent.key} «${parent.title}». It covers these of its requirements:`}`;
+  const lines = covers.map((r) => ({ r, text: parent.criteria[Number(r.slice(1)) - 1] ?? "" }));
+  const least = (r: string) => `\n${r} — …`;
+  let room = TASK_TEXT_MAX - head.length;
+  let out = head;
+  for (const [i, l] of lines.entries()) {
+    const reserve = lines.slice(i + 1).reduce((n, x) => n + least(x.r).length, 0); // the later ones keep their number at least
+    const full = `\n${l.r} — ${l.text}`;
+    const part = full.length <= room - reserve ? full
+      : room - reserve > least(l.r).length ? `\n${l.r} — ${l.text.slice(0, room - reserve - least(l.r).length)}…` : least(l.r);
+    out += part;
+    room -= part.length;
+  }
+  return out.slice(0, TASK_TEXT_MAX); // ponytail: a lead text of 4000 (the check's limit) always leaves room; a longer one is cut at the end
+}
+
+// The text of a task's run: a parent whose subtasks were made gets a paragraph for the closing run (§6): check its own
+// requirements on the current code and finish what is missing. Any other task: its text.
+export function taskText(task: Pick<BoardTask, "id" | "text" | "decompose" | "decomposedBy">, tasks: readonly BoardTask[], language: "ru" | "en"): string {
+  if (!task.decompose || !task.decomposedBy) return task.text;
+  const keys = tasks.filter((t) => t.parentId === task.id && !t.archivedAt).sort((a, b) => a.order - b.order).map((t) => t.key);
+  if (!keys.length) return task.text;
+  const say = (n: number) => {
+    const list = keys.slice(0, n).join(", ") + (n < keys.length ? (language === "ru" ? ` и ещё ${keys.length - n}` : ` and ${keys.length - n} more`) : "");
+    return language === "ru"
+      ? `Подзадачи ${list} выполнены и влиты в итог доски. Проверьте требования этой задачи на текущем коде и доделайте только недостающее.`
+      : `Subtasks ${list} are done and merged into the board's result. Check this task's requirements on the current code and finish only what is missing.`;
+  };
+  let n = keys.length;
+  while (n > 1 && say(n).length > SUBTASKS_PARAGRAPH_MAX) n--;
+  return `${task.text}\n\n${say(n)}`;
 }
 
 // B4 (§5.2): the pauses of a run the autopilot waits through — the person answers, the run goes on
@@ -632,9 +735,10 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   const resultIn = (d: string) => resultOf(facts.find((f) => f.runId === statuses.get(d)?.current)) === "folder";
   const next = place.filter((t) => {
     const s = statuses.get(t.id);
-    if (!s || t.archivedAt || s.column !== "queue" || s.attempts !== 0 || t.dependsOn.some((d) => statuses.get(d)?.depsNote)) return false;
-    if (!t.dependsOn.length) return s.reason === null;
-    return t.dependsOn.every((d) => !board.tasks.some((x) => x.id === d) || (statuses.get(d)?.done && (inHead(d) || resultIn(d))));
+    const held = heldDeps(t, board.tasks); // E2 (§2.2): an archived subtask does not hold its parent
+    if (!s || t.archivedAt || s.column !== "queue" || s.attempts !== 0 || held.some((d) => statuses.get(d)?.depsNote) || notYetSplit(t, s)) return false;
+    if (!held.length) return s.reason === null;
+    return held.every((d) => !board.tasks.some((x) => x.id === d) || (statuses.get(d)?.done && (inHead(d) || resultIn(d))));
   }).sort((a, b) => a.order - b.order)[0] ?? null;
   // a merge's checks wait to be retried while the project is quiet: no new task meanwhile (§2.3)
   if (next && busy < parallelOf(budget) && !retrying) {

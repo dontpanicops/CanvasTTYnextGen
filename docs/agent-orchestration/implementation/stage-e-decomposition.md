@@ -506,3 +506,35 @@ JSON-схема хода `decompose`:
   `splitViolations` (§4). Отказ возвращает причины лиду в следующем ходе.
 - Факты задачи доски (`completion`) по-прежнему только `confirmed` / `no_checks`: запуск разбиения не запуск задачи.
 - Тесты: `tests/orchestration-journal-split.test.mjs` (7), `tests/orchestration-split-run.test.mjs` (11).
+
+### E2 — подзадачи на доске
+
+- Поля задачи (§2): `decompose` хранится только как `true`; `isTask` принимает новые поля, если они есть, и проверяет
+  их форму. Задачу с `parentId` и `decompose` из файла не отвергает: ручная правка не откладывает доску, отказ — при
+  создании и правке. Отметка при тексте длиннее 7600 — `text_too_long`. «Выполнить целиком» (`decompose: false`)
+  снимает и `decomposedBy`; при неархивных подзадачах — `has_subtasks`, во время разбиения — `decomposition_active`
+  (manager).
+- Создание (§5): `boardStore.split(parentId, runId, plan)` — одна запись со всеми отказами §5.1 кодом отказа хранилища.
+  Тот же `runId` второй раз ничего не пишет. `parent_started` и `board_unreadable` проверяет manager.
+- §2.2: помощник `heldDeps` — архивная подзадача не держит своего родителя — в `boardStatuses`, `startBase`, `baseOf`,
+  `nextTask` и отборе `next` у `autopilotParallelStep`; `taskOk` идёт через `boardStatuses`. «Родитель в архиве» — E3.
+- Тексты (§6): `subtaskText`, `taskText`; `goalFor` получает задачи доски (`tasks`), ручной старт с карточки — тот же
+  `taskText`.
+- Состояния (§2.1): `parentStatus` в `boardStatuses` — только пока у родителя нет своего запуска. Факты запуска
+  разбиения: `decompositionOf`, `split` (вид завершения — отдельно от `completion`, которое остаётся у запусков задач;
+  отступление от формулировки §7), `splitFailed`.
+- Старт и слежение (§3.4): `startDecomposition` (команда `board:decompose`), `watchDecompositions` /
+  `syncDecompositions` — свой таймер 1,5 с, запускается стартом и первым чтением доски после перезапуска.
+- Отступления:
+  - **Связь не выбирается**: как у разрешения C3, CLI берутся из окружения проекта; отказа `no_link` нет (ключ текста
+    есть, его никто не шлёт).
+  - **Отказ создания §5.1 хранится в памяти** (`splitFailed`): после перезапуска условия проверяются ещё раз, при тех же
+    условиях код тот же.
+  - **«Пропустить» у подзадачи** даёт родителю `waits_head` с её ключом (правило C2 для зависимости вне итога доски), а
+    не `waits_merge`, как писал §2.2. Правила C не менялись.
+  - Разбиение, чьё предложение ещё не стало подзадачами, тоже `decomposition_active` для нового старта.
+  - Удалённый с доски родитель: слежение его не видит, `parent_gone` — только у архивного.
+  - Защита автопилота до E3: `nextTask` и `next` не берут родителя с отметкой без `decomposedBy`, кроме ответа `whole`.
+  - Для теста паритета i18n добавлены ключи `orchError_*` всех кодов отказа (`board_unreadable`, `parent_gone`,
+    `parent_started`, `requirements_changed`, `not_marked`) сверх таблицы §10.
+- Тесты: `tests/orchestration-board-split.test.mjs` (11), `tests/orchestration-board-split-manager.test.mjs` (6).

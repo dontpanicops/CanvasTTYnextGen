@@ -1192,6 +1192,7 @@ export const IPC = {
   orchestrationBoardMergeResolve: "orchestration:board-merge-resolve",
   orchestrationBoardMergeSkip: "orchestration:board-merge-skip",
   orchestrationBoardMergeAgent: "orchestration:board-merge-agent",
+  orchestrationBoardDecompose: "orchestration:board-decompose", // E2
   orchestrationBoardMergeOpen: "orchestration:board-merge-open",
   orchestrationBoardHead: "orchestration:board-head",
   orchestrationBoardQueue: "orchestration:board-queue",

@@ -53,7 +53,7 @@ import { canvasFile, createCanvasStore, folderHolder } from "./canvasStore.ts";
 import type { RunMode } from "./canvasStore.ts";
 import { createBoardMerge, markersLines, mergeRequirements } from "./boardMerge.ts";
 import { createBoardStore } from "./boardStore.ts";
-import type { TaskInput } from "./boardStore.ts";
+import type { SplitTask, TaskInput } from "./boardStore.ts";
 import { boardStatuses, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, WAIT_PAUSES, type BoardHead } from "../../../shared/taskBoard.ts";
 import { AUTOPILOT_BUDGET, baseOf, type AutopilotBudget, type BoardPlace, type BoardTask, type BoardView, type RunTaskFacts } from "../../../shared/taskBoard.ts";
 import type { OrchestrationRunView, OrchestrationTurnPurpose, OrchestrationWorkMode } from "../../../shared/orchestration.ts";
@@ -187,6 +187,8 @@ export function createRunManager(deps: RunManagerDeps) {
   // B1: the tasks a create is under way for, from its first line: a removal asked meanwhile is refused (§3.3)
   const startingTasks = new Map<string, number>();
   const startingRuns = new Map<string, Set<string>>(); // taskId → the requests being created for it (B4: one run of a task)
+  const startingSplits = new Set<string>(); // E2: the parents a decomposition run is being started for (two starts at once)
+  const splitFailed = new Map<string, string>(); // E2: decomposition runId → the §5.1 code the subtasks could not be made with
   const watchers = new Map<string, Set<(e: OrchestrationRunEvent) => void>>();
   let closing = false;
   const known = (id: string) => deps.workspaceKnown?.(id) ?? true;
@@ -625,7 +627,7 @@ export function createRunManager(deps: RunManagerDeps) {
     if (problem) refuse(problem.id.startsWith("access_") ? "access_unsupported" : "model_unsupported", problem.detail);
     // A separate copy and a worktree start without the project's ignored files: the dependency folders are cloned from
     // the project when their lock files match (cloneDependencies), the rest is prepared in them.
-    const steps = !profile.prepare.auto ? []
+    const steps = !profile.prepare.auto || (given as { decomposition?: unknown }).decomposition ? [] // E1: a decomposition run has no preparation
       : workMode === "project" ? profile.prepare.steps : await worktreeSteps(source, profile.prepare.steps);
     return {
       ...rest, mode,
@@ -731,7 +733,7 @@ export function createRunManager(deps: RunManagerDeps) {
   // journal's first record (run.created), so a run of a newer version, an unreadable or a damaged one keeps its task.
   // The facts of a run not held here are kept while its journal and taken.json are the same (size, mtime); a held run
   // has state the journal does not (the active turn, a permission request), so it is read each time.
-  const goalMeta = new Map<string, { taskId: string | null; taskKey: string | null; createdAt: number; goalWorkMode: OrchestrationWorkMode | null; board: string | null }>();
+  const goalMeta = new Map<string, { taskId: string | null; taskKey: string | null; createdAt: number; goalWorkMode: OrchestrationWorkMode | null; board: string | null; decompositionOf?: string }>();
   const factsCache = new Map<string, { stamp: string; facts: RunTaskFacts }>();
   async function metaOf(runId: string) {
     const known = goalMeta.get(runId);
@@ -747,7 +749,7 @@ export function createRunManager(deps: RunManagerDeps) {
       } catch { first = null; } finally { await fh.close().catch(() => {}); }
     }
     const ref = first?.type === "run.created" && isTextRef(first.data?.goal) ? first.data.goal : null;
-    const g = ref ? await readText(deps.root, runId, ref).then((b) => JSON.parse(b.toString("utf8")) as { task?: { id?: unknown; key?: unknown }; createdAt?: unknown; workMode?: unknown; base?: { branch?: unknown } }, () => null) : null;
+    const g = ref ? await readText(deps.root, runId, ref).then((b) => JSON.parse(b.toString("utf8")) as { task?: { id?: unknown; key?: unknown }; createdAt?: unknown; workMode?: unknown; base?: { branch?: unknown }; decomposition?: { taskId?: unknown } }, () => null) : null;
     const meta = {
       taskId: typeof g?.task?.id === "string" && isUuid(g.task.id) ? g.task.id : null,
       taskKey: typeof g?.task?.key === "string" && /^T-\d{1,6}$/.test(g.task.key) ? g.task.key : null,
@@ -755,7 +757,9 @@ export function createRunManager(deps: RunManagerDeps) {
       // the goal's work mode: the run's own when its work folder's marker cannot be read
       goalWorkMode: g?.workMode === "project" || g?.workMode === "copy" || g?.workMode === "worktree" ? g.workMode as OrchestrationWorkMode : null,
       // C1: the board's merged head its copy started from
-      board: typeof g?.base?.branch === "string" && BOARD_REF.test(g.base.branch) ? g.base.branch : null
+      board: typeof g?.base?.branch === "string" && BOARD_REF.test(g.base.branch) ? g.base.branch : null,
+      // E2: a decomposition run names its parent (no task: it is no run of one)
+      ...(typeof g?.decomposition?.taskId === "string" && isUuid(g.decomposition.taskId) ? { decompositionOf: g.decomposition.taskId } : {})
     };
     if (g) goalMeta.set(runId, meta); // a goal text not readable yet (a run being created) is asked again next time
     return meta;
@@ -797,6 +801,8 @@ export function createRunManager(deps: RunManagerDeps) {
         facts = {
           runId, ...meta, workspaceId, status: view.status, reason: view.reason, newer: !!view.newer, halted: !!view.halted,
           limit: view.progress?.budget?.reached ?? null, completion: view.progress?.completion === "confirmed" || view.progress?.completion === "no_checks" ? view.progress.completion : null, // E1: a split run is no task run
+          // E2: its kind kept apart from `completion` (the task runs')
+          ...(view.progress?.completion === "proposed" || view.progress?.completion === "whole" || view.progress?.completion === "rejected" ? { split: view.progress.completion } : {}),
           phase: runPhase(view, (last?.purpose as OrchestrationTurnPurpose | undefined) ?? null),
           permission: !!view.permission, workMode, taken, ...(st && isCopy(workMode) ? await touched(runId, st) : {}),
           ...(view.status === "paused" && view.reason === "environment_error" ? { providerLimit: await providerLimitOf(runId, view) } : {})
@@ -834,7 +840,10 @@ export function createRunManager(deps: RunManagerDeps) {
     const names = await readdir(join(deps.root, "runs")).catch(() => [] as string[]);
     const out: RunTaskFacts[] = [];
     const owner = runOwners(inQueue ?? await canvas.read(exists), known);
-    for (const id of names.filter(isUuid).sort()) out.push(await runTaskFacts(id, owner));
+    for (const id of names.filter(isUuid).sort()) {
+      const f = await runTaskFacts(id, owner);
+      out.push(splitFailed.has(id) ? { ...f, splitFailed: splitFailed.get(id)! } : f); // not in the cache: a new failure is seen at once
+    }
     return out;
   }
   async function boardView(): Promise<BoardView> {
@@ -850,7 +859,9 @@ export function createRunManager(deps: RunManagerDeps) {
       const w = await resolutionPause(m.agent.resolutionRunId);
       if (w && w !== "other") m.agent.waits = w;
     }
-    return { board: r.board, readOnly: r.readOnly, facts: (await taskFacts()).filter((f) => f.taskId || f.taskKey), autopilot: await autopilot.state(),
+    const facts = await taskFacts();
+    if (splitsPending(r.board, facts).length) watchDecompositions(); // E2: also after a restart (§3.4)
+    return { board: r.board, readOnly: r.readOnly, facts: facts.filter((f) => f.taskId || f.taskKey || f.decompositionOf), autopilot: await autopilot.state(),
       ...(heads.length ? { heads } : {}), ...(queued.length ? { queued } : {}) };
   }
   // C1 (§4.5): «Объединить» — a task «Done» in a separate copy into its place's head (started if it has none); its result
@@ -1015,6 +1026,94 @@ export function createRunManager(deps: RunManagerDeps) {
       if (outcome) await merges.resolutionEnded(w.runId, w.resolutionRunId, outcome).catch(() => {});
     }
   }
+  // E2 (stage-e-decomposition.md §2.1, §3.4, §5): the decomposition run of a parent — a run of the project in a separate copy
+  // from the board's result (or HEAD), standing on no link (its owner the workspace), the parent's text and requirements as
+  // its goal, no checks. Its end is handed to the board by syncDecompositions: the subtasks are made by main, once.
+  const SPLIT_LIMITS = { turns: 6, leadTurnMs: 10 * 60_000 }; // runMs: the default (it counts the pauses too)
+  const sameSplit = (t: BoardTask, f: RunTaskFacts) => f.decompositionOf === t.id && f.workspaceId === t.workspaceId;
+  const latestSplit = (t: BoardTask, facts: readonly RunTaskFacts[]): RunTaskFacts | undefined =>
+    facts.filter((f) => sameSplit(t, f)).sort((a, b) => a.createdAt - b.createdAt || a.runId.localeCompare(b.runId)).at(-1);
+  // a proposal of the latest run that is not made into subtasks yet (nor failed to be)
+  const proposalWaits = (t: BoardTask, f: RunTaskFacts | undefined): boolean =>
+    !!f && f.status === "completed" && f.split === "proposed" && !f.splitFailed && t.decomposedBy !== f.runId;
+  const splitGoesOn = (t: BoardTask, facts: readonly RunTaskFacts[]): boolean =>
+    facts.some((f) => sameSplit(t, f) && f.status !== "unreadable" && !TERMINAL_STATUSES.includes(f.status)) || proposalWaits(t, latestSplit(t, facts));
+  const decompositionActive = (t: BoardTask, facts: readonly RunTaskFacts[]): boolean => startingSplits.has(t.id) || splitGoesOn(t, facts);
+  // the parents main has to follow: a decomposition run under way, or a proposal not made into subtasks yet
+  const splitsPending = (b: { tasks: BoardTask[] }, facts: readonly RunTaskFacts[]): BoardTask[] =>
+    b.tasks.filter((t) => {
+      if (!t.decompose) return false;
+      const f = latestSplit(t, facts);
+      return !!f && ((f.status !== "unreadable" && !f.newer && !TERMINAL_STATUSES.includes(f.status)) || proposalWaits(t, f));
+    });
+  async function startDecomposition(taskId: string, language: "ru" | "en"): Promise<{ runId: string }> {
+    notOpen();
+    platformOk();
+    // nothing awaits between the check and the mark: two starts at once cannot both pass
+    if (startingSplits.has(taskId)) refuse("decomposition_active", "a split of the task is being started");
+    startingSplits.add(taskId);
+    try {
+      if (deps.journalV2 !== true) refuse("journal_v1", "a split needs journal v2");
+      const r = await board.read();
+      if (r.readOnly) refuse(r.readOnly === "newer_version" ? "newer_version" : "damaged", "the board cannot be read");
+      const t = r.board.tasks.find((x) => x.id === taskId) ?? refuse("task_not_found", `no task ${taskId}`);
+      if (t.archivedAt) refuse("task_archived", "the task is archived");
+      if (!t.decompose || t.parentId) refuse("invalid_task", "the task is not marked «Split into subtasks»");
+      const facts = await taskFacts();
+      if ([...(startingRuns.get(t.id) ?? [])].length || facts.some((f) => f.taskId === t.id && f.status !== "unreadable" && !TERMINAL_STATUSES.includes(f.status))) {
+        refuse("task_active_run", `${t.key} has an active run`);
+      }
+      if (splitGoesOn(t, facts)) refuse("decomposition_active", `${t.key} is being split`);
+      if (r.board.tasks.some((x) => x.parentId === t.id && !x.archivedAt)) refuse("has_subtasks", `${t.key} has subtasks`);
+      const heads = await merges.heads([{ workspaceId: t.workspaceId, project: t.project }]).catch(() => [] as BoardHead[]);
+      if (boardStatuses(r.board, facts, heads).get(t.id)?.depsWait) refuse("deps_not_ready", `${t.key} waits for its dependencies`);
+      // the board's result of the place, else the project's HEAD
+      const base = heads.find((h) => h.workspaceId === t.workspaceId && h.project === t.project)?.commit
+        ?? await run(deps.gitPath(), ["rev-parse", "HEAD"], { cwd: t.project }).then((o) => o.stdout.trim(), () => "");
+      if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(base)) refuse("invalid_base", "the project has no commit to split from");
+      const runId = randomUUID();
+      const goal = {
+        text: t.text, criteria: [...t.criteria], checks: [], commands: [], workMode: "copy", mode: "autopilot", reviewPlan: false,
+        language, limits: SPLIT_LIMITS, decomposition: { taskId: t.id, key: t.key, base }
+      } as OrchestrationGoalInput;
+      await createRunFor({ requestId: runId, source: t.project, goal });
+      await canvas.own(runId, t.workspaceId);
+      watchDecompositions();
+      return { runId };
+    } finally { startingSplits.delete(taskId); }
+  }
+  // one timer (1.5 s) while a decomposition goes on or a proposal waits; started by a start and by the first read of the
+  // board after a restart (boardView). ponytail: it polls, as the resolution timer does
+  let splitTimer: ReturnType<typeof setInterval> | null = null;
+  let splitTick: Promise<void> | null = null;
+  function watchDecompositions(): void {
+    if (splitTimer || closing) return;
+    splitTimer = setInterval(() => { splitTick ??= syncDecompositions().finally(() => { splitTick = null; }); }, 1500);
+    splitTimer.unref?.();
+  }
+  async function syncDecompositions(): Promise<void> {
+    const r = await board.read();
+    const facts = await taskFacts();
+    const todo = splitsPending(r.board, facts);
+    if (!todo.length) { if (splitTimer) clearInterval(splitTimer); splitTimer = null; return; }
+    for (const t of todo) {
+      const f = latestSplit(t, facts);
+      if (!proposalWaits(t, f)) continue;
+      try {
+        if (r.readOnly) refuse("board_unreadable", "the board cannot be read");
+        if (facts.some((x) => x.taskId === t.id)) refuse("parent_started", `${t.key} has a run of its own`);
+        const st = (await readRun(deps.root, f!.runId)).state;
+        if (!st) throw new Error("the split run cannot be read"); // not a §5.1 code: it shows as «failed»
+        const proposal = JSON.parse((await readText(deps.root, f!.runId, st.orch.split.proposed!.ref)).toString("utf8")) as { tasks: SplitTask[] };
+        const goal = JSON.parse((await readText(deps.root, f!.runId, st.goal)).toString("utf8")) as { criteria: string[]; language?: string };
+        await board.split(t.id, f!.runId, { criteria: goal.criteria.length, language: goal.language === "ru" ? "ru" : "en", tasks: proposal.tasks });
+      } catch (error) {
+        // ponytail: kept in memory — after a restart the same conditions give the same code (checked once more)
+        const code = (error as { code?: unknown })?.code;
+        splitFailed.set(f!.runId, code === "board_newer_version" || code === "board_unavailable" ? "board_unreadable" : typeof code === "string" ? code : "failed");
+      }
+    }
+  }
   // «Accept the result» (owner's decision 2): only of the task's latest run, completed without checks by its journal
   async function acceptTask(taskId: string): Promise<BoardTask> {
     const { board: b } = await board.read();
@@ -1061,6 +1160,8 @@ export function createRunManager(deps: RunManagerDeps) {
       || facts.some((f) => f.taskId === t!.id && f.runId !== runId && f.status !== "unreadable" && !TERMINAL_STATUSES.includes(f.status))) {
       refuse("task_active_run", `${t!.key} has an active run`);
     }
+    // E2 (stage-e-decomposition.md §3.4): no start of a parent while it is being split — the person's or the autopilot's
+    if (decompositionActive(t!, facts)) refuse("decomposition_active", `${t!.key} is being split`);
     // C1: from the board's merged head of the task's place, as it is now; a dependency counts once it is in the head
     // (owner's decision 9 of stage C) — B's rule of results in branches does not apply then
     if (goal.base && BOARD_REF.test(goal.base.branch)) {
@@ -1231,7 +1332,14 @@ export function createRunManager(deps: RunManagerDeps) {
       workspaceOk(input?.workspaceId);
       return board.create({ ...input, project: await realpath(input.project).catch(() => refuse("invalid_task", "the project folder does not exist")) });
     }),
-    boardUpdate: (id: string, patch: Parameters<typeof board.update>[1]) => result(() => board.update(id, patch)),
+    // E2: «Do it whole» is refused while the task is being split (the store refuses it with live subtasks)
+    boardUpdate: (id: string, patch: Parameters<typeof board.update>[1]) => result(async () => {
+      if (patch?.decompose === false) {
+        const t = (await board.read()).board.tasks.find((x) => x.id === id);
+        if (t && decompositionActive(t, await taskFacts())) refuse("decomposition_active", `${t.key} is being split`);
+      }
+      return board.update(id, patch);
+    }),
     boardArchive: (id: string, archived: boolean) => result(() => leaving(id, archived, () => board.archive(id, archived, () => startingTasks.has(id)))),
     // a run being created counts: its journal may not be there yet (stage-b-board.md §3.3)
     boardRemove: (id: string, dependents: string[] = []) => result(() => leaving(id, true,
@@ -1246,6 +1354,8 @@ export function createRunManager(deps: RunManagerDeps) {
     boardMergeSkip: (runId: string) => result(() => merges.skip(runIdOk(runId))),
     // C3: «Поручить агенту» on a paused merge
     boardMergeAgent: (runId: string, language: "ru" | "en" = "en") => result(() => startResolution(runIdOk(runId), language)),
+    // E2 (stage-e-decomposition.md §3.4): «Разбить» — the decomposition run of a parent
+    boardDecompose: (taskId: string, language: "ru" | "en" = "en") => result(() => startDecomposition(isUuid(taskId) ? taskId : refuse("invalid_argument", "taskId must be a UUID"), language)),
     boardMergeDir: (runId: string) => result(() => merges.copyOf(runIdOk(runId))),
     boardHeadBranch: (workspaceId: string, project: string) => result(async () => { notOpen(); return merges.branch(workspaceId, await placeProject(project)); }),
     boardHeadApply: (workspaceId: string, project: string) => result(async () => { notOpen(); return merges.apply(workspaceId, await placeProject(project)); }),
@@ -1567,6 +1677,9 @@ export function createRunManager(deps: RunManagerDeps) {
       closing = true;
       if (resolutionTimer) clearInterval(resolutionTimer);
       resolutionTimer = null;
+      if (splitTimer) clearInterval(splitTimer);
+      splitTimer = null;
+      await splitTick;
       await resolutionTick; // a merge moving in an agent's tree finishes its write before the stores close
       autopilot.shutdown();
       if (queueTimer) { clearInterval(queueTimer); queueTimer = null; }
