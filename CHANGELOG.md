@@ -4,6 +4,19 @@
 
 ## Unreleased
 
+## 1.5.20 — 2026-10-19
+
+A merge conflict can be handed to an agent; at a provider's usage limit the board's autopilot waits and continues by itself; the board tells you when a merge waits for you.
+
+- «Hand to an agent» on a merge into the board's result that stopped on a conflict (or on failed checks after a merge): a resolution run starts in the merge's copy with both tasks' requirements, the agent resolves the conflict, the project's checks and the reviewer run, and only then does the result move. When it does not manage, the merge comes back to you with why and the agent's run to open. The merge line says «Merging T-2 · an agent resolves the conflict» meanwhile.
+- The autopilot's window has «Conflicts»: leave to me (as before) or hand to an agent. Handed, a resolution run takes a slot and counts against the autopilot's runs and minutes; with no slot free it waits.
+- A provider's usage limit is now recognised in the CLI's own output (Claude Code's rate-limit event, Codex's usage-limit error and its windows), with the reset time when the CLI gives it. The run pauses as before; its reason reads «the Claude usage limit is reached until 15:00», and so does the task's card.
+- At a limit the autopilot no longer turns off: «waiting for the Claude limit until 15:00» — it starts nothing new and hands nothing to an agent, merges go on. A minute after the reset it continues its own paused runs («continued T-1 after the limit reset at 15:01»), at most three times in a row; a run you started it leaves to you. The wait costs neither runs nor minutes. When the reset time is unknown it asks you to press «Continue».
+- A resolution run that hits a limit keeps its try and continues after the reset; paused for another reason, it gives the merge back to you.
+- Board notifications: «Merging T-2 — a conflict, resolve it» (and failed checks, the agent did not resolve it, the budget spent) once per merge and reason, also after a restart; «The limit reset, continuing: T-1»; «The board's result updated: T-2, T-3», off by default (Settings → Notifications, under «Board»). A merge waiting for you counts on the Dock badge. A merge's notification opens its board.
+- Formats: board.json may carry a merge's agent (resolution run, attempt); a resolution run's journal is v3 like a merge's — older versions list it read only. The run's feed gets an error entry for a limit; settings get notifications.boardHead (older versions drop it). The run journal itself does not change.
+- No model call added; checked on fake CLIs, in the app built from source and in the packaged one. A real usage limit has not been recorded yet: recognition follows the CLIs' formats.
+
 ## 1.5.19 — 2026-10-14
 
 The run's plan and result as documents to read, copy and put on the canvas; «Copied» only when it is.
