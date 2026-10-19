@@ -25,6 +25,7 @@ import {
   newerVersion,
   parseJournal,
   V2_MIN_READER_VERSION,
+  RESOLUTION_VERSION,
   V2_EVENTS,
   type V2Event,
   type CompletionKind,
@@ -129,6 +130,7 @@ export interface RunWriter {
   recordCheckFinished(data: CheckFinishedInput): Promise<void>;
   // Orchestration decisions (stage-5-contract.md §8); texts are TextRefs the caller got from putText.
   recordOrchTurn(data: OrchTurnData): Promise<void>;
+  recordAppPlan(data: { plan: TextRef; stageCount: number; conditionsAssigned: number }): Promise<void>;
   recordPlan(data: PlanRecordedData): Promise<void>;
   recordReview(data: ReviewRecordedData): Promise<void>;
   recordQuestion(data: QuestionAskedData): Promise<void>;
@@ -160,7 +162,8 @@ export interface CheckFinishedInput {
 
 // version 2: a journal of format v2 (journal-v2-format.md) in its final form (A4, §3.4: no formatPreview; A1–A3
 // development builds marked theirs so).
-export interface CreateRunOptions { goal: string; version?: 1 | 2; clock?: () => Date; io?: StoreIo }
+// kind «resolution» (C3, stage-c3-conflicts.md §7.2): a resolution run's journal — envelope v3, the rules of v2.
+export interface CreateRunOptions { goal: string; version?: 1 | 2; kind?: "resolution"; clock?: () => Date; io?: StoreIo }
 export interface OpenRunOptions { acceptTornTail?: boolean; clock?: () => Date; io?: StoreIo; hooks?: LockHooks }
 
 const JOURNAL = "journal.jsonl";
@@ -392,6 +395,7 @@ interface WriterInit {
   state: RunState | null;
   size: number;
   version?: 1 | 2; // the journal's, for its first record; afterwards the replayed state's
+  envelope?: 3; // a resolution run's (C3), for its first record; afterwards the replayed state's
   clock?: () => Date;
   io?: StoreIo;
 }
@@ -410,7 +414,8 @@ class Writer implements RunWriter {
   private readonly listeners = new Set<(seq: number) => void>();
   private poisoned = false;
   private closing: Promise<void> | null = null;
-  private readonly version: 1 | 2;
+  private readonly version: 1 | 2; // the rules
+  private readonly envelope: 1 | 2 | 3; // the v of each line: the rules', or 3 for a resolution run (C3)
 
   constructor(init: WriterInit) {
     this.runId = init.runId;
@@ -419,7 +424,8 @@ class Writer implements RunWriter {
     this.lock = init.lock;
     this.staleLock = init.staleLock;
     this.current = init.state;
-    this.version = init.state?.version ?? init.version ?? 1;
+    this.version = init.state?.version ?? (init.envelope ? 2 : init.version) ?? 1;
+    this.envelope = init.state ? init.state.envelope ?? init.state.version : init.envelope ?? this.version;
     this.size = init.size;
     this.clock = init.clock ?? (() => new Date());
     this.io = init.io ?? {};
@@ -454,10 +460,11 @@ class Writer implements RunWriter {
   // Inside the queue only. The record is replayed on a copy first, so the writer never writes what replay rejects;
   // state advances only after the full line is written and fsynced.
   private async appendNow(type: EventType, data: Record<string, unknown>): Promise<void> {
-    if (!isValidEventData(type, data, this.version)) fail("invalid_input", `${type} data does not match the schema`);
+    if (!isValidEventData(type, data, this.envelope)) fail("invalid_input", `${type} data does not match the schema`);
     const cur = this.current;
     const { record, line } = buildRecord(cur ? { seq: cur.lastSeq, hash: cur.lastHash } : null, this.runId,
-      this.clock().toISOString(), type, data, this.version, this.version === 2 ? { minReaderVersion: V2_MIN_READER_VERSION } : null);
+      this.clock().toISOString(), type, data, this.envelope, this.envelope === RESOLUTION_VERSION ? { minReaderVersion: RESOLUTION_VERSION }
+        : this.envelope === 2 ? { minReaderVersion: V2_MIN_READER_VERSION } : null);
     if (line.length - 1 > MAX_LINE_BYTES) fail("invalid_input", `${type} record is over ${MAX_LINE_BYTES} bytes`);
     if (this.size + line.length > MAX_JOURNAL_BYTES) fail("invalid_input", "the journal is full");
     let next: RunState;
@@ -553,7 +560,7 @@ class Writer implements RunWriter {
       mode: input.mode, sessionId: input.sessionId ?? null
     };
     // Check the shape before writing the task text, so bad input leaves no file behind.
-    if (!isValidEventData("turn.intent", { ...fields, task: { sha256: ZERO_HASH, bytes: 0 } }, this.version)) {
+    if (!isValidEventData("turn.intent", { ...fields, task: { sha256: ZERO_HASH, bytes: 0 } }, this.envelope)) {
       fail("invalid_input", "turn.intent data does not match the schema");
     }
     const task = await this.putText(input.task);
@@ -661,6 +668,11 @@ class Writer implements RunWriter {
       : ["turnId", "purpose", "stage", "round", "planVersion", "clarificationVersion", "tree"]));
   }
 
+  // C3: the application's plan of a resolution run (stage-c3-conflicts.md §3.2), its first record after the workspace
+  recordAppPlan(data: { plan: TextRef; stageCount: number; conditionsAssigned: number }): Promise<void> {
+    return this.append("plan.recorded", { by: "app", version: 1, plan: data.plan, firstStage: 1, stageCount: data.stageCount, conditionsAssigned: data.conditionsAssigned });
+  }
+
   recordPlan(data: PlanRecordedData): Promise<void> {
     return this.append("plan.recorded", pick(data, data.conditionsAssigned === undefined ? ["turnId", "version", "plan", "firstStage", "stageCount"]
       : ["turnId", "version", "plan", "firstStage", "stageCount", "conditionsAssigned"]));
@@ -739,10 +751,11 @@ export async function createRun(root: string, runId: string, options: CreateRunO
     await fsyncDir(runs);
     lock = await acquireLock(dir);
     const fh = await open(join(dir, JOURNAL), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_EXCL, 0o600);
-    writer = new Writer({ runId, dir, fh, lock, staleLock: null, state: null, size: 0, version: options.version === 2 ? 2 : 1, clock: options.clock, io: options.io });
+    writer = new Writer({ runId, dir, fh, lock, staleLock: null, state: null, size: 0, version: options.version === 2 ? 2 : 1,
+      ...(options.kind === "resolution" ? { envelope: RESOLUTION_VERSION } : {}), clock: options.clock, io: options.io });
     await fsyncDir(dir);
     const goal = await writer.putText(options.goal);
-    await writer.append("run.created", { goal });
+    await writer.append("run.created", options.kind === "resolution" ? { goal, kind: "resolution" } : { goal });
     return writer;
   } catch (error) {
     // The directory is ours (exclusive mkdir) and holds nothing confirmed: remove it rather than leave a broken run.

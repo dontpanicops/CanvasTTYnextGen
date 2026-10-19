@@ -41,6 +41,9 @@ export interface Goal {
   language?: "ru" | "en"; // the interface language at creation: the person-facing texts are asked for in it
   task?: { id: string; key: string }; // B1, journal v2 only: the board task (journal-v2-format.md §2.10); not used by the cycle
   base?: { branch: string; commit: string; key: string }; // B4, journal v2 copy only: what the copy started from; not used by the cycle
+  // C3 (stage-c3-conflicts.md §3): a resolution run of a merge into the board's result — its copy starts from `base` (the
+  // conflict as a commit), its plan is the application's. Not `task`: the run is never a task's run (metaOf, boardStatuses)
+  resolution?: { mergeRunId: string; taskId: string; key: string; base: string };
   // A1.1, the service's own (never in the goal text): the decided checks that run in the check profile — the lead's
   // lines the person did not let out of it (journal-v2-format.md §2.6)
   sandboxed?: string[];
@@ -174,8 +177,9 @@ function decide(input: CycleInput): Action {
   const inPlan = (r: Review) => meta(r.turnId)?.planVersion === planVersion;
   const leadReviews = orch.reviews.filter(inPlan);
   const replan = (): Action => {
-    // planVersion plans exist; the next one is replan number planVersion
-    if (planVersion > limits.replans) return pause("limit_reached", "replans");
+    // planVersion plans exist; the next one is replan number planVersion. C3: a resolution run has no lead — the
+    // application's plan is its only one (stage-c3-conflicts.md §5)
+    if (planVersion > limits.replans || orch.plan?.turnId === null) return pause("limit_reached", "replans");
     return turn("plan", null, null);
   };
   // Journal v2, a goal without check commands (journal-v2-format.md §2.4): the first plan turn proposes them and nothing

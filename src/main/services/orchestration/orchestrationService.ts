@@ -82,6 +82,8 @@ export interface GoalInput {
   // B4 (owner's decision 11), journal v2 and a separate copy only: the copy starts from this commit — the result branch
   // of the task `key` this run's task depends on — instead of the project's working folder
   base?: { branch: string; commit: string; key: string };
+  // C3, journal v2 rules in a resolution run's journal: the merge run it resolves for (stage-c3-conflicts.md §3)
+  resolution?: { mergeRunId: string; taskId: string; key: string; base: string };
 }
 
 // Stage 12: the checks of a goal with commands are those command lines, run by the user's login shell.
@@ -468,6 +470,7 @@ function checkGoal(input: GoalInput, registryOf: (commands: string[] | null) => 
   if (input.language !== undefined && input.language !== "ru" && input.language !== "en") bad("language must be ru or en");
   const task = input.task === undefined ? undefined : checkTask(input.task, v2, bad);
   const base = input.base === undefined ? undefined : checkBase(input.base, v2, input.workMode, bad);
+  const resolution = input.resolution === undefined ? undefined : checkResolution(input, v2, bad);
   const registry = registryOf(commands);
   if (typeof input?.text !== "string" || input.text.trim() === "" || input.text.length > 8000) bad("text must be 1..8000 characters");
   if (!Array.isArray(input.criteria) || input.criteria.length < 1 || input.criteria.length > 32
@@ -489,7 +492,36 @@ function checkGoal(input: GoalInput, registryOf: (commands: string[] | null) => 
     ...(input.mode ? { mode: input.mode } : {}), ...(prepare ? { prepare } : {}), ...(finish ? { finish } : {}),
     ...(input.access ? { access: { claude: input.access.claude, codex: input.access.codex } } : {}),
     ...(models ? { models } : {}), ...(input.language ? { language: input.language } : {}), ...(task ? { task } : {}),
-    ...(base ? { base } : {})
+    ...(base ? { base } : {}), ...(resolution ? { resolution } : {})
+  };
+}
+
+// C3: a resolution run — journal v2's rules, a separate copy from the conflict's commit, the project's checks and the
+// markers' check, no task and no other base (stage-c3-conflicts.md §2.1, §3)
+function checkResolution(input: GoalInput, v2: boolean, bad: (m: string) => never): { mergeRunId: string; taskId: string; key: string; base: string } {
+  const o = input.resolution as Record<string, unknown> | null;
+  if (!o || typeof o !== "object" || Array.isArray(o) || Object.keys(o).sort().join() !== "base,key,mergeRunId,taskId") bad("resolution must be { mergeRunId, taskId, key, base }");
+  if (!TASK_ID.test(String(o!.mergeRunId)) || !TASK_ID.test(String(o!.taskId))) bad("resolution: mergeRunId and taskId are UUIDs");
+  if (typeof o!.key !== "string" || !/^T-\d{1,6}$/.test(o!.key)) bad("resolution.key must be T-<n>");
+  if (typeof o!.base !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(o!.base)) bad("resolution.base must be a full commit id");
+  if (!v2 || !input.commands?.length) bad("resolution: a journal v2 goal with check commands");
+  if (input.workMode !== "copy") bad("resolution: a separate copy only");
+  if (input.task !== undefined || input.base !== undefined) bad("resolution: no task, no other base");
+  if ((input.mode ?? "autopilot") !== "autopilot" || input.reviewPlan === true) bad("resolution: the autopilot, no plan review");
+  return { mergeRunId: o!.mergeRunId as string, taskId: o!.taskId as string, key: o!.key as string, base: o!.base as string };
+}
+
+// C3 (§3.2): the application's plan of a resolution run — one stage, its task the goal's text, one «change» condition
+// covering every requirement (marked by the reviewer). The checks are the goal's: the run completes only with all of them
+// passed, so a «check» condition would add nothing (and 16 commands would not fit a stage's 12 conditions).
+export function resolutionPlan(goal: Pick<Goal, "text" | "criteria" | "language">): PlanReportV2 {
+  return {
+    stages: [{
+      title: goal.language === "en" ? "Resolve the merge" : "Разрешить объединение", task: goal.text,
+      conditions: [{ keep: null, evidence: { kind: "change", check: null }, covers: goal.criteria.map((_, i) => `R${i + 1}`),
+        text: goal.language === "en" ? "The merge is resolved with the requirements of both sides kept" : "Объединение разрешено с сохранением требований обеих сторон" }]
+    }],
+    dropped: [], dropRequirements: [], question: null
   };
 }
 
@@ -590,15 +622,21 @@ export function createOrchestrationService(deps: OrchestrationDeps) {
       const goal = checkGoal(input.goal, (commands) => registryFor(deps, commands), clock(), v2);
       if (input.requestKey !== undefined) goal.requestKey = input.requestKey;
       const runId = input.runId ?? randomUUID();
-      const writer = await storeCreateRun(deps.root, runId, { goal: canonical(goal), version: v2 ? 2 : 1, io: deps.storeIo });
+      const writer = await storeCreateRun(deps.root, runId, { goal: canonical(goal), version: v2 ? 2 : 1, ...(goal.resolution ? { kind: "resolution" as const } : {}), io: deps.storeIo });
       let ws: Workspace;
       try {
         ws = await createWorkspace({ root: deps.root, runId, source: input.source, gitPath: deps.gitPath, mode: goal.workMode ?? "copy",
-          ...(goal.base ? { from: goal.base.commit } : {}) });
+          ...(goal.base ? { from: goal.base.commit } : goal.resolution ? { from: goal.resolution.base } : {}) });
         await writer.recordWorkspaceCreated({
           sourcePathSha256: createHash("sha256").update(ws.sourcePath).digest("hex"),
           baseline: { commit: ws.baseline.commit, tree: ws.baseline.tree }, head: ws.head
         });
+        // C3: the application's plan, before any turn (no lead in a resolution run)
+        if (goal.resolution) {
+          const report = resolutionPlan(goal);
+          const { text, assigned } = numberPlan(report, reportConditions(report).stages, writer.state().orch.nextCondition);
+          await writer.recordAppPlan({ plan: await writer.putText(canonical(text)), stageCount: text.stages.length, conditionsAssigned: assigned });
+        }
       } catch (error) {
         await writer.setRunStatus("failed", null).catch(() => {});
         await writer.close().catch(() => {});

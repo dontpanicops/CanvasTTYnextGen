@@ -368,7 +368,7 @@ export function replayFindings(state: RunState, t: FindingsTexts): FindingsRepla
     recorded.push({ firstStage: p.firstStage, seq: p.seq });
     // A4: a proposal the person accepted — its choices for the findings of the dropped conditions
     const decision = p.proposed ? o.proposals.find((x) => x.turnId === p.turnId)?.decision : null;
-    if (!decision) return null;
+    if (!decision || p.turnId === null) return null;
     const why = applyChoices(book, t.choices?.[p.turnId] as PlanChoices, new Set((t.plans[i].dropped ?? []).map((x) => x.condition)), {
       seq: p.seq, runKey: decision.runKey, tree: decision.tree, commandId: decision.commandId, conditions, firstStage: p.firstStage, lastStage: p.firstStage + p.stageCount - 1
     });
