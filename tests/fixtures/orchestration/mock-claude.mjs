@@ -136,6 +136,14 @@ async function run(task, prev) {
     for (let i = 0; i < SIZES.events; i++) await emit(assistant(text, `r${i}`));
   }
   const base = { type: "result", duration_ms: 1, num_turns: 1, session_id: sessionId, total_cost_usd: 0, usage: { input_tokens: task.length, output_tokens: 1 } };
+  const limit = script?.answer?.__limit ?? (MODE === "usage_limit" ? { resetsAt: Number(process.env.MOCK_LIMIT_RESETS_AT ?? 0) || null } : null);
+  if (limit) { // C4: as in the session below
+    await emit({ type: "rate_limit_event", session_id: sessionId, uuid: randomUUID(),
+      rate_limit_info: { status: "rejected", ...(limit.resetsAt ? { resetsAt: limit.resetsAt } : {}), rateLimitType: "five_hour", isUsingOverage: false } });
+    await emit({ ...base, subtype: "error_during_execution", is_error: true, result: "You've hit your limit" });
+    process.exitCode = 1;
+    return;
+  }
   if (MODE === "fail") {
     await emit({ ...base, subtype: "error_during_execution", is_error: true });
     process.exitCode = 1;
@@ -339,7 +347,15 @@ async function host() {
       ...(r?.behavior === "allow" ? {} : { is_error: true }), content: r?.behavior === "allow" ? `wrote ${w.rel}` : "denied" }] } });
   }
   if (interrupted) return;
-  if (MODE === "fail") {
+  // C4: a scripted step {"__limit": {"resetsAt": <seconds> | null}} (or MOCK_MODE=usage_limit) is a turn the account's
+  // limit ends, as Claude Code 2.1.303's stream-json says: rate_limit_event rejected, then the result with an error
+  const limit = script?.answer?.__limit ?? (MODE === "usage_limit" ? { resetsAt: Number(process.env.MOCK_LIMIT_RESETS_AT ?? 0) || null } : null);
+  if (limit) {
+    await emit({ type: "rate_limit_event", session_id: sessionId, uuid: randomUUID(),
+      rate_limit_info: { status: "rejected", ...(limit.resetsAt ? { resetsAt: limit.resetsAt } : {}), rateLimitType: "five_hour", isUsingOverage: false } });
+    await emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: sessionId, duration_ms: 1, num_turns: 1,
+      result: "You've hit your limit" });
+  } else if (MODE === "fail") {
     await emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: sessionId, duration_ms: 1, num_turns: 1 });
   } else {
     const report = script ? withProposal(script.answer, readSchema(flags["--json-schema"])) : reportFor(st, readSchema(flags["--json-schema"]), resumeId !== null);

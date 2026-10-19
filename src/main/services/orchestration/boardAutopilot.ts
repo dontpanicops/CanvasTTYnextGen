@@ -6,7 +6,8 @@
 import type { OrchestrationGoalInput, OrchestrationProjectProfile, OrchestrationReadiness, OrchestrationResult, OrchestrationTakeOutcome } from "../../../shared/orchestration.ts";
 import {
   activeMs, autopilotParallelStep, autopilotStep, goalFor, isCopy,
-  type AutopilotBudget, type BoardHead, type AutopilotState, type AutopilotStop, type AutopilotStopCode, type AutopilotWaiting, type Board, type RunTaskFacts
+  type AutopilotBudget, type AutopilotLimit, type BoardHead, type AutopilotState, type AutopilotStop, type AutopilotStopCode, type AutopilotWaiting, type Board,
+  type LimitedRun, type RunTaskFacts
 } from "../../../shared/taskBoard.ts";
 
 type R<T> = OrchestrationResult<T>;
@@ -28,6 +29,11 @@ export interface BoardAutopilotDeps {
   // C3 (stage-c3-conflicts.md §9): a paused merge handed to an agent (its resolution run), or set to wait for a slot / the person
   toAgent?(mergeRunId: string, language: "ru" | "en"): Promise<R<{ runId: string }>>;
   mergeWait?(mergeRunId: string, why: "merge_waits_slot" | "merge_budget"): Promise<R<void>>;
+  // C4 (stage-c4-limits.md §2): «Продолжить» of a run paused at a provider's limit; the turns a limit ended (the run's
+  // feed); the resolution runs (C3) of a place paused at a limit
+  resume?(runId: string): Promise<R<void>>;
+  limitTurns?(runId: string): Promise<Set<string>>;
+  resolutionLimits?(workspaceId: string, project: string): Promise<{ runId: string; key: string; provider: string; resetsAt: number | null }[]>;
   newId(): string;
   now(): number;
 }
@@ -45,6 +51,10 @@ interface Live {
   refused: Set<string>; // C3: merges the application would not hand to an agent: the person's
   pending: string | null; // a start asked and not answered yet (a refusal clears it; an error turns the autopilot off)
   waits: string | null;
+  // C4: its continuations of a run in a row (reset once a turn of it completes), the reset each was for
+  resumes: Map<string, { n: number; reset: number | null; turns: number }>;
+  limit: AutopilotLimit | null;
+  resumed: { runId: string; key: string; provider: string; at: string } | null;
   busy: boolean;
 }
 
@@ -53,6 +63,9 @@ const fingerprint = (p: OrchestrationProjectProfile): string => JSON.stringify({
   access: p.access, workMode: p.workMode, models: p.models ?? null, finish: p.finish, checks: p.checks, prepare: p.prepare, env: p.env,
   grants: p.grants.map((g) => `${g.provider}:${g.kind}:${g.fingerprint}`).sort()
 });
+
+// C4: the turns of a run that completed (a run that got past its limit completed one since)
+const completedTurns = (records: Records): number => records.filter((r) => r.type === "turn.finished" && r.data.outcome === "completed").length;
 
 // A start that is refused for a while only: the link or the folder holds another run, which the autopilot waits out
 const LATER = new Set(["link_busy", "folder_busy"]);
@@ -73,11 +86,32 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
   // on — its own and the person's, the updates from HEAD too: their preparation and checks, never a pause for the person
   async function used(l: Live, head?: BoardHead | null): Promise<{ runs: number; ms: number }> {
     let ms = 0;
-    for (const id of [...l.started, ...l.agents]) ms += activeMs(await deps.journal(id).catch(() => []), deps.now());
+    // C4 (§2.4): a pause at a provider's limit is a wait, not work
+    for (const id of [...l.started, ...l.agents]) {
+      ms += activeMs(await deps.journal(id).catch(() => []), deps.now(), undefined, await deps.limitTurns?.(id).catch(() => new Set<string>()) ?? new Set());
+    }
     const merges = (head === undefined ? await deps.head(l.workspaceId, l.project).catch(() => null) : head)?.merges ?? [];
     for (const m of merges) if (m.createdAt >= l.since) l.merges.add(m.runId);
     for (const id of l.merges) ms += activeMs(await deps.journal(id).catch(() => []), deps.now(), () => true);
     return { runs: l.started.length + l.agents.length, ms };
+  }
+
+  // C4 (§2.2, §2.4): the runs of the place paused at a provider's limit. Its own (started, agents) it may continue; a
+  // reset not later than the one it continued at last reads as unknown; a run that completed a turn since starts afresh
+  async function limitedRuns(l: Live, board: Board, facts: RunTaskFacts[], at: { workspaceId: string; project: string }): Promise<LimitedRun[]> {
+    const place = new Map(board.tasks.filter((t) => t.workspaceId === at.workspaceId && t.project === at.project).map((t) => [t.id, t.key]));
+    const found = facts.filter((f) => f.status === "paused" && f.providerLimit && f.taskId && place.has(f.taskId))
+      .map((f) => ({ runId: f.runId, key: place.get(f.taskId!)!, provider: f.providerLimit!.provider, resetsAt: f.providerLimit!.resetsAt }));
+    found.push(...await deps.resolutionLimits?.(at.workspaceId, at.project).catch(() => []) ?? []);
+    const out: LimitedRun[] = [];
+    for (const f of found) {
+      const own = l.started.includes(f.runId) || l.agents.includes(f.runId);
+      let r = l.resumes.get(f.runId);
+      if (r && completedTurns(await deps.journal(f.runId).catch(() => [])) > r.turns) { l.resumes.delete(f.runId); r = undefined; }
+      const stale = r && f.resetsAt !== null && r.reset !== null && f.resetsAt <= r.reset;
+      out.push({ ...f, resetsAt: stale ? null : f.resetsAt, own, resumes: r?.n ?? 0 });
+    }
+    return out;
   }
 
   async function tick(linkId: string): Promise<void> {
@@ -97,11 +131,26 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
     if (live.get(linkId) !== l) return; // turned off meanwhile
     // C1: a separate copy goes with N slots and the board's merged head (C2: a worktree too); the project folder as in B
     const head = isCopy(profile.workMode) ? await deps.head(at.workspaceId, at.project) : null;
+    const limited = await limitedRuns(l, board, facts, at);
+    const now = deps.now();
     const next = isCopy(profile.workMode)
-      ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head, l.refused)
-      : autopilotStep(board, facts, { ...at, workMode: profile.workMode }, l.started.at(-1) ?? null, await used(l, null), await budgetOf(linkId));
+      ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head, l.refused, limited, now)
+      : autopilotStep(board, facts, { ...at, workMode: profile.workMode }, l.started.at(-1) ?? null, await used(l, null), await budgetOf(linkId), limited, now);
     l.waits = next.kind === "wait" ? next.why : null;
+    l.limit = next.kind === "wait" ? next.limit ?? null : null;
     if (next.kind === "wait") return;
+    if (next.kind === "resume") {
+      const r = await deps.resume?.(next.runId) ?? { ok: false as const, code: "resume_unavailable", message: "" };
+      // the person continued it first, or it is no longer paused: the next step sees it as it is
+      if (!r.ok && (r.code === "stale_revision" || r.code === "invalid_state")) return;
+      if (!r.ok) return off(linkId, "resume_failed", r.code, next.key);
+      const was = l.resumes.get(next.runId);
+      const turns = completedTurns(await deps.journal(next.runId).catch(() => []));
+      const reset = limited.find((x) => x.runId === next.runId)?.resetsAt ?? null;
+      l.resumes.set(next.runId, { n: (was?.n ?? 0) + 1, reset, turns });
+      l.resumed = { runId: next.runId, key: next.key, provider: next.provider, at: new Date(deps.now()).toISOString() };
+      return;
+    }
     if (next.kind === "off") return off(linkId, next.code, next.detail, next.key, next.waiting);
     if (next.kind === "head") { await deps.ensureHead(at.workspaceId, at.project); return; }
     if (next.kind === "merge") {
@@ -171,7 +220,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       const at = await deps.link(linkId);
       if (!at) throw Object.assign(new Error("no such link"), { code: "link_not_found" });
       const profile = await deps.profile(at.project);
-      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], refused: new Set(), pending: null, waits: null, busy: false });
+      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], refused: new Set(), pending: null, waits: null, busy: false, resumes: new Map(), limit: null, resumed: null });
       stops.delete(linkId);
       // the first step on the next beat; the timer alone never keeps the process up
       timer ??= setInterval(() => { for (const id of live.keys()) void tick(id); }, tickMs);
@@ -182,7 +231,8 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       for (const id of new Set([...live.keys(), ...stops.keys()])) {
         const l = live.get(id);
         const u = l ? await used(l) : { runs: 0, ms: 0 };
-        out[id] = { on: !!l, budget: await budgetOf(id), used: { runs: u.runs, minutes: Math.floor(u.ms / 60_000) }, waits: l?.waits ?? null, stop: stops.get(id) ?? null };
+        out[id] = { on: !!l, budget: await budgetOf(id), used: { runs: u.runs, minutes: Math.floor(u.ms / 60_000) }, waits: l?.waits ?? null, stop: stops.get(id) ?? null,
+          limit: l?.limit ?? null, resumed: l?.resumed ?? null };
       }
       return out;
     },

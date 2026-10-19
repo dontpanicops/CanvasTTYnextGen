@@ -456,6 +456,13 @@ export function createActivityLog(root: string, limits = ACTIVITY_LIMITS) {
       return { entries, lastId: l.entries.at(-1)?.id ?? 0, more: after.length > entries.length, gaps, firstId: l.firstId };
     },
 
+    // The newest entries of a run (C4: why a run paused, for the board's facts)
+    async tail(runId: string, n: number): Promise<OrchestrationActivityEntry[]> {
+      await load(runId);
+      await logFor(runId).chain;
+      return logFor(runId).entries.slice(-n);
+    },
+
     subscribe(runId: string, listener: ActivityListener): () => void {
       const l = logFor(runId);
       l.listeners.add(listener);
@@ -533,6 +540,10 @@ export function createRunActivity(log: ActivityLog, runId: string) {
               put(role, provider, turnId, "process_exited", "CLI process exited", { code: p.code ?? null, signal: p.signal ?? null });
             }
           }
+        },
+        // C4 (stage-c4-limits.md §1.2): a provider's usage limit, written before turn_finished
+        limit(text: string, detail: Draft["detail"]) {
+          put(role, provider, turnId, "error", text, detail);
         },
         finished(outcome: string, detail: Draft["detail"] = {}) {
           put(role, provider, turnId, "turn_finished", outcome, detail);

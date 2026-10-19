@@ -17,6 +17,7 @@ import type {
   OrchestrationTakeOutcome
 } from "../../../../shared/orchestration.ts";
 import type { LocaleId } from "../../../../shared/contracts.ts";
+import { viewCause, type PauseCause } from "../../../../shared/orchestrationPause.ts";
 import { t, type TranslationKey } from "../../lib/i18n.ts";
 
 // The same sets the service uses (orchestrationService.ts); the service still decides.
@@ -466,71 +467,19 @@ export const APP_FAILURE_STEPS: readonly string[] = ["relay_failed", "relay_inco
 
 // ---------- why a run paused: one classification for every place that says it ----------
 
-// Main's reason (the journal, format v1) and, for a pause a turn's end caused, what that turn's activity adds:
-// - provider_limit: a provider's usage limit ended the turn. The journal says paused(environment_error), as for any failed
-//   turn; the CLI's message is in the turn's activity. The one recorded message is Codex's (codex-cli 0.155.1,
-//   evidence/real-stage-13/series-S3-S5-S6-attempt2): "You’ve hit your usage limit. … try again at Sep 28th, 2026
-//   11:51 PM." No real Claude limit message has been recorded, so a Claude limit still reads as an environment error.
-//   The reset is the CLI's own words, not parsed.
-// - model_unsupported: the provider refused the model the CLI's own config names. The journal says
-//   paused(environment_error); the recorded message is Codex's HTTP 400 (codex-cli 0.155.1, evidence/real-a-gate R1):
-//   "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account." The model is the CLI's words.
-// - ending: the step that ended the turn (TurnResult.ending, kept as detail.endStep of its turn_finished entry).
-// - reason: main's reason as it is.
-export type PauseCause =
-  | { kind: "provider_limit"; reason: string; provider: string; resetsAt: string | null }
-  | { kind: "model_unsupported"; reason: string; provider: string; model: string }
-  | { kind: "prepare"; reason: string; command: string | null } // the environment preparation failed (its last record)
-  | { kind: "ending"; reason: string; step: string }
-  | { kind: "reason"; reason: string };
-const USAGE_LIMIT = /\bhit your usage limit\b/i;
-const MODEL_UNSUPPORTED = /The '([^']{1,100})' model is not supported when using Codex\b/i;
-
-// reason: main's pause reason; turnId: the turn whose end the pause is (null: none); entries: the run's activity.
-export function pauseCause(reason: string, turnId: string | null, entries: readonly OrchestrationActivityEntry[]): PauseCause {
-  const turn = turnId ? entries.filter((e) => e.turnId === turnId) : [];
-  const finished = [...turn].reverse().find((e) => e.kind === "turn_finished");
-  if (!finished || finished.text === "completed") return { kind: "reason", reason };
-  // the service's outcome -> pause reason mapping (pauseForOutcome): the pause must be this outcome's
-  const mapped = finished.text === "invalid_report" ? "invalid_report"
-    : finished.text === "protocol_error" || finished.text === "contract_violation" ? "protocol_error" : "environment_error";
-  if (mapped !== reason) return { kind: "reason", reason };
-  const limit = reason === "environment_error" ? turn.find((e) => e.kind === "error" && USAGE_LIMIT.test(e.text)) : undefined;
-  if (limit) return { kind: "provider_limit", reason, provider: limit.provider ?? finished.provider ?? "provider", resetsAt: /try again at (.+?)\.?\s*$/i.exec(limit.text)?.[1] ?? null };
-  const model = reason === "environment_error" ? turn.map((e) => (e.kind === "error" ? MODEL_UNSUPPORTED.exec(e.text)?.[1] : undefined)).find(Boolean) : undefined;
-  if (model) return { kind: "model_unsupported", reason, provider: "codex", model };
-  const step = finished.detail?.endStep;
-  return typeof step === "string" && step !== "ok" ? { kind: "ending", reason, step } : { kind: "reason", reason };
-}
-
-// The turn a pause at `end` (exclusive index into entries) belongs to: the last one that finished before it, unless the
-// run went on since (a status other than paused/pausing) or paused for another reason in between.
-export function pausedTurn(entries: readonly OrchestrationActivityEntry[], end: number, reason: string): string | null {
-  let at = end - 1;
-  while (at >= 0 && entries[at].kind !== "turn_finished") at--;
-  if (at < 0) return null;
-  const later = entries.slice(at + 1, end).filter((x) => x.kind === "status");
-  if (later.some((x) => x.detail?.status !== "paused" && x.detail?.status !== "pausing")) return null;
-  if (later.some((x) => x.detail?.status === "paused" && x.detail?.reason !== reason)) return null;
-  return entries[at].turnId;
-}
-
-// The cause of the run's current state (null: no reason). Only a pause is explained by a turn.
-export function viewCause(view: OrchestrationRunView, entries: readonly OrchestrationActivityEntry[]): PauseCause | null {
-  if (!view.reason) return null;
-  if (view.status !== "paused") return { kind: "reason", reason: view.reason };
-  // a failed preparation pauses the run before anything else (cycle.ts): the pause is that preparation's
-  const prep = view.progress?.prepare;
-  if (prep?.status === "failed" && (view.reason === "needs_user_action" || view.reason === "external_failure")) return { kind: "prepare", reason: view.reason, command: prep.command };
-  return pauseCause(view.reason, pausedTurn(entries, entries.length, view.reason), entries);
-}
+// C4: one classification of a pause for the window and for main (stage-c4-limits.md §1.3)
+export { pauseCause, pausedTurn, viewCause, type PauseCause } from "../../../../shared/orchestrationPause.ts";
 
 const PROVIDER_NAMES: Record<string, string> = { codex: "Codex", claude: "Claude" };
 export const providerName = (provider: string): string => PROVIDER_NAMES[provider] ?? provider;
 
 // The reason in words, the same everywhere: the run panel, the activity rows, the agent cards, the feed and the history.
 export function causeText(locale: LocaleId, cause: PauseCause): string {
-  if (cause.kind === "provider_limit") return t(locale, "orchReason_provider_limit").replace("{provider}", providerName(cause.provider));
+  if (cause.kind === "provider_limit") {
+    // C4: main's own reset, when it recognised one
+    if (cause.resetsAtMs !== null) return t(locale, "orchReason_provider_limit_at").replace("{provider}", providerName(cause.provider)).replace("{at}", resetTime(locale, cause.resetsAtMs));
+    return t(locale, "orchReason_provider_limit").replace("{provider}", providerName(cause.provider));
+  }
   if (cause.kind === "prepare") return t(locale, "orchReason_prepare_failed").replace("{command}", cause.command ?? "?");
   if (cause.kind === "model_unsupported") return t(locale, "orchReason_model_unsupported").replace("{provider}", providerName(cause.provider)).replace("{model}", cause.model);
   const ending = cause.kind === "ending" ? t(locale, `orchEnding_${cause.step}` as TranslationKey) : undefined;
@@ -549,9 +498,21 @@ export function nextStepKey(view: OrchestrationRunView, entries: readonly Orches
   return step !== null && APP_FAILURE_STEPS.includes(step) ? "app_failure" : runHeadline(view).next;
 }
 
-export function providerLimit(view: OrchestrationRunView, entries: readonly OrchestrationActivityEntry[]): { provider: string; resetsAt: string | null } | null {
+export function providerLimit(view: OrchestrationRunView, entries: readonly OrchestrationActivityEntry[]): { provider: string; resetsAt: string | null; resetsAtMs: number | null } | null {
   const cause = viewCause(view, entries);
-  return cause?.kind === "provider_limit" ? { provider: cause.provider, resetsAt: cause.resetsAt } : null;
+  return cause?.kind === "provider_limit" ? { provider: cause.provider, resetsAt: cause.resetsAt, resetsAtMs: cause.resetsAtMs } : null;
+}
+
+// C4 (stage-c4-limits.md §5): a reset time in the Mac's local time — today «15:00», tomorrow «завтра 15:00», later
+// «24 окт. 15:00»
+export function resetTime(locale: LocaleId, at: number, now = Date.now()): string {
+  const lang = locale === "ru" ? "ru-RU" : "en-US";
+  const time = new Intl.DateTimeFormat(lang, { hour: "numeric", minute: "2-digit" }).format(at);
+  const day = (ms: number) => { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+  const days = Math.round((day(at) - day(now)) / 86_400_000);
+  if (days <= 0) return time;
+  if (days === 1) return `${t(locale, "orchResetTomorrow")} ${time}`;
+  return `${new Intl.DateTimeFormat(lang, { day: "numeric", month: "short" }).format(at)}, ${time}`;
 }
 
 // UX audit PR 3: a completed run whose next step is the «Changes» tab has that as its main button; «New goal» second.
@@ -563,8 +524,9 @@ export const changesFirst = (view: OrchestrationRunView, entries: readonly Orche
 export function nextStepText(locale: LocaleId, view: OrchestrationRunView, entries: readonly OrchestrationActivityEntry[]): string {
   const limit = providerLimit(view, entries);
   if (limit) {
-    return t(locale, limit.resetsAt ? "orchNext_provider_limit_at" : "orchNext_provider_limit")
-      .replaceAll("{provider}", providerName(limit.provider)).replace("{at}", limit.resetsAt ?? "");
+    const at = limit.resetsAt ?? (limit.resetsAtMs !== null ? resetTime(locale, limit.resetsAtMs) : null);
+    return t(locale, at ? "orchNext_provider_limit_at" : "orchNext_provider_limit")
+      .replaceAll("{provider}", providerName(limit.provider)).replace("{at}", at ?? "");
   }
   const cause = viewCause(view, entries);
   if (cause?.kind === "prepare") return t(locale, "orchNext_prepare_failed").replace("{command}", cause.command ?? "?");

@@ -273,13 +273,37 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     [board.statuses, board.view]);
   // B4: a note of the board's autopilot opens the link's latest run (where it stopped)
   const lastOfLink = useCallback((id: string) => orch.canvas.links.find((l) => `board-${l.linkId}` === id || l.linkId === id)?.runIds.at(-1), [orch.canvas]);
+  // C4: a merge's note or the head's opens the board of that merge's workspace
+  const showBoardRef = useRef<(workspaceId: string) => void>(() => {});
   const openNote = useCallback((id: string) => {
+    if (id.startsWith("merge-") || id.startsWith("head-")) {
+      const runId = id.slice(6);
+      const h = board.view?.heads?.find((x) => x.merges.some((m) => m.runId === runId)) ?? (id.startsWith("head-") ? board.view?.heads?.[0] : undefined);
+      showBoardRef.current(h?.workspaceId ?? workspace.activeId);
+      return;
+    }
     const runId = id.startsWith("board-") ? lastOfLink(id) : id;
     if (runId) openRunInWorkspace(runId);
-  }, [lastOfLink, openRunInWorkspace]);
+  }, [board.view, lastOfLink, openRunInWorkspace, workspace.activeId]);
   const autopilotPlace = useCallback((linkId: string) => { const runId = lastOfLink(linkId); return runId ? noteTitle(runId) : "Raoden Loom"; }, [lastOfLink, noteTitle]);
   const notes = useRunNotifications({ locale: settings.locale, prefs: settings.notifications, runs: orch.runs, activity: orch.activity, title: noteTitle, open: openNote, accepting,
-    autopilot: board.view?.autopilot, boardPlace: autopilotPlace });
+    autopilot: board.view?.autopilot, boardPlace: autopilotPlace, heads: board.view?.heads });
+  // B2: «Board» shows the task board on a workspace's canvas, or brings it forward (C4: a board note too, in its workspace)
+  showBoardRef.current = (target: string): void => {
+    if (target !== workspace.activeId) workspace.switchTo(target);
+    const placed = board.view?.board.places?.[target];
+    if (placed) {
+      if (target !== workspace.activeId) workspace.focusBounds(placed);
+      raiseLayer(boardLayerId(target));
+      return;
+    }
+    // the first free place in view, around its centre; over the other windows only when none is free
+    const c = viewportCenterWorldPoint();
+    const taken = [homeBounds, ...allWindowBounds];
+    const at = (dx: number, dy: number): SessionBounds => ({ position: { x: Math.round(c.x - BOARD_SIZE.width / 2 + dx), y: Math.round(c.y - BOARD_SIZE.height / 2 + dy) }, size: { ...BOARD_SIZE } });
+    const steps = [0, 1, -1, 2, -2].flatMap((i) => [0, 1, -1, 2, -2].map((j) => at(i * (BOARD_SIZE.width / 2 + 40), j * (BOARD_SIZE.height / 2 + 40))));
+    void board.place(target, steps.find((b) => !taken.some((w) => boundsIntersect(b, w))) ?? at(0, 0));
+  };
   // The run holding the folder and its workspace are main's answer, not rebuilt here from snapshots.
   const folderBusy = useCallback((held: unknown) => {
     const h = folderHolderOf(held, knownWorkspace);
@@ -1282,15 +1306,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       <div className="canvas-overlays" ref={overlays}>
         <div className="canvas-overlay-slot canvas-overlay-slot--top-center">
           <WorkspaceBar controls={workspace} counts={counts} locale={settings.locale} onDialog={openWsDialog}
-            board={{ shown: !!boardPlace, toggle: () => {
-              if (boardPlace) { raiseLayer(boardLayerId(workspace.activeId)); return; }
-              // the first free place in view, around its centre; over the other windows only when none is free
-              const c = viewportCenterWorldPoint();
-              const taken = [homeBounds, ...allWindowBounds];
-              const at = (dx: number, dy: number): SessionBounds => ({ position: { x: Math.round(c.x - BOARD_SIZE.width / 2 + dx), y: Math.round(c.y - BOARD_SIZE.height / 2 + dy) }, size: { ...BOARD_SIZE } });
-              const steps = [0, 1, -1, 2, -2].flatMap((i) => [0, 1, -1, 2, -2].map((j) => at(i * (BOARD_SIZE.width / 2 + 40), j * (BOARD_SIZE.height / 2 + 40))));
-              void board.place(workspace.activeId, steps.find((b) => !taken.some((w) => boundsIntersect(b, w))) ?? at(0, 0));
-            } }} />
+            board={{ shown: !!boardPlace, toggle: () => showBoardRef.current(workspace.activeId) }} />
         </div>
         {CANVAS_OVERLAY_PLACEMENTS.map((placement) => (
           <div className={`canvas-overlay-slot canvas-overlay-slot--${placement}`} key={placement}>

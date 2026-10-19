@@ -220,7 +220,8 @@ export interface WorkspacesApi {
 }
 
 // Notifications of orchestration runs (UX audit PR 3): which events tell the person, and the Dock.
-export interface NotificationSettings { waiting: boolean; completed: boolean; failed: boolean; dockBadge: boolean; bounce: boolean; board: boolean }
+// boardHead (C4): «the board's result updated» — off by default, under «board»
+export interface NotificationSettings { waiting: boolean; completed: boolean; failed: boolean; dockBadge: boolean; bounce: boolean; board: boolean; boardHead: boolean }
 
 export interface AppSettings {
   locale: LocaleId;

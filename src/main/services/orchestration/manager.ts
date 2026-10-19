@@ -54,9 +54,10 @@ import type { RunMode } from "./canvasStore.ts";
 import { createBoardMerge, markersLines, mergeRequirements } from "./boardMerge.ts";
 import { createBoardStore } from "./boardStore.ts";
 import type { TaskInput } from "./boardStore.ts";
-import { boardStatuses, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, type BoardHead } from "../../../shared/taskBoard.ts";
+import { boardStatuses, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, WAIT_PAUSES, type BoardHead } from "../../../shared/taskBoard.ts";
 import { AUTOPILOT_BUDGET, baseOf, type AutopilotBudget, type BoardPlace, type BoardTask, type BoardView, type RunTaskFacts } from "../../../shared/taskBoard.ts";
-import type { OrchestrationTurnPurpose, OrchestrationWorkMode } from "../../../shared/orchestration.ts";
+import type { OrchestrationRunView, OrchestrationTurnPurpose, OrchestrationWorkMode } from "../../../shared/orchestration.ts";
+import { viewCause } from "../../../shared/orchestrationPause.ts";
 import { runOwners, workspaceOf } from "../../../shared/workspaceOwnership.ts";
 import { createBoardAutopilot } from "./boardAutopilot.ts";
 import { COMMON_WORKSPACE_ID } from "../../../shared/contracts.ts";
@@ -759,6 +760,11 @@ export function createRunManager(deps: RunManagerDeps) {
     if (g) goalMeta.set(runId, meta); // a goal text not readable yet (a run being created) is asked again next time
     return meta;
   }
+  // C4 (stage-c4-limits.md §1.3): the pause read by the window's rules from the run's feed; no record — no limit known
+  async function providerLimitOf(runId: string, view: OrchestrationRunView): Promise<RunTaskFacts["providerLimit"]> {
+    const cause = viewCause(view, await activityLog.tail(runId, 400).catch(() => []));
+    return cause?.kind === "provider_limit" ? { provider: cause.provider, resetsAt: cause.resetsAtMs } : null;
+  }
   async function runTaskFacts(runId: string, owner: (runId: string) => string): Promise<RunTaskFacts> {
     const dir = join(deps.root, "runs", runId);
     const stamp = await Promise.all([stat(join(dir, "journal.jsonl")), stat(join(dir, "workspace", "taken.json"))].map((p) => p.then((s) => `${s.size}:${s.mtimeMs}`, () => "-"))).then((a) => a.join("|"));
@@ -792,7 +798,8 @@ export function createRunManager(deps: RunManagerDeps) {
           runId, ...meta, workspaceId, status: view.status, reason: view.reason, newer: !!view.newer, halted: !!view.halted,
           limit: view.progress?.budget?.reached ?? null, completion: view.progress?.completion ?? null,
           phase: runPhase(view, (last?.purpose as OrchestrationTurnPurpose | undefined) ?? null),
-          permission: !!view.permission, workMode, taken, ...(st && isCopy(workMode) ? await touched(runId, st) : {})
+          permission: !!view.permission, workMode, taken, ...(st && isCopy(workMode) ? await touched(runId, st) : {}),
+          ...(view.status === "paused" && view.reason === "environment_error" ? { providerLimit: await providerLimitOf(runId, view) } : {})
         };
       }
     }
@@ -838,6 +845,11 @@ export function createRunManager(deps: RunManagerDeps) {
     // C2: the starts that wait for a place, and the ones whose start from the queue was refused (until asked again)
     const queued = [...startQueue.map((q) => ({ taskId: q.taskId, linkId: q.linkId, at: q.at, busy: q.busy, limit: q.limit, failed: null })),
       ...[...queueFailed].map(([taskId, f]) => ({ taskId, linkId: f.linkId, at: f.at, busy: 0, limit: 0, failed: f.code }))];
+    // C4 (§3): what a resolution run under way waits for, on its merge's line
+    for (const h of heads) for (const m of h.merges) if (m.agent?.pending) {
+      const w = await resolutionPause(m.agent.resolutionRunId);
+      if (w && w !== "other") m.agent.waits = w;
+    }
     return { board: r.board, readOnly: r.readOnly, facts: (await taskFacts()).filter((f) => f.taskId || f.taskKey), autopilot: await autopilot.state(),
       ...(heads.length ? { heads } : {}), ...(queued.length ? { queued } : {}) };
   }
@@ -965,6 +977,17 @@ export function createRunManager(deps: RunManagerDeps) {
     resolutionTimer = setInterval(() => { resolutionTick ??= syncResolutions().finally(() => { resolutionTick = null; }); }, 1500);
     resolutionTimer.unref?.();
   }
+  // C4 (stage-c4-limits.md §3): a resolution run's pause — at a provider's limit, for the person, or anything else
+  // (which ends the agent's try); null: not paused
+  async function resolutionPause(runId: string): Promise<{ kind: "limit"; provider: string; resetsAt: number | null } | { kind: "person" } | "other" | null> {
+    const snap = await result(() => snapshot(runId));
+    if (!snap.ok || snap.value.view.status !== "paused") return null;
+    const v = snap.value.view;
+    if (v.reason === "limit_reached") return null; // ended by syncResolutions as before
+    if (WAIT_PAUSES.has(v.reason ?? "")) return { kind: "person" };
+    const limit = v.reason === "environment_error" ? await providerLimitOf(runId, v) : null;
+    return limit ? { kind: "limit", ...limit } : "other";
+  }
   async function syncResolutions(): Promise<void> {
     const waiting = await merges.awaiting().catch(() => []);
     if (!waiting.length) { if (resolutionTimer) clearInterval(resolutionTimer); resolutionTimer = null; return; }
@@ -981,6 +1004,10 @@ export function createRunManager(deps: RunManagerDeps) {
         const cps = st?.workspace ? Object.entries(st.workspace.checkpoints).sort((a, b) => Number(b[0]) - Number(a[0])) : [];
         outcome = st?.completion?.kind === "confirmed" && cps.length ? { kind: "completed", tree: cps[0]![1].tree } : { kind: "failed", detail: "failed" };
       } else if (v.status === "stopped" || v.status === "failed") outcome = { kind: "failed", detail: v.status };
+      // C4 (§3): a pause at a provider's limit or for the person keeps the try; any other ends it
+      else if (v.status === "paused" && v.reason !== "limit_reached" && await resolutionPause(w.resolutionRunId) === "other") {
+        outcome = { kind: "failed", detail: `paused:${v.reason ?? "unknown"}` };
+      }
       else if (v.status === "paused" && v.reason === "limit_reached") {
         const kind = v.progress?.budget?.reached ?? null;
         outcome = { kind: "failed", detail: kind === "replans" ? "replan" : `limit:${kind ?? "unknown"}` };
@@ -1576,6 +1603,24 @@ export function createRunManager(deps: RunManagerDeps) {
     // C3: «Поручить агенту» by the autopilot, and the merge's wait for a slot or the person
     toAgent: (mergeRunId, language) => result(() => startResolution(mergeRunId, language)),
     mergeWait: (mergeRunId, why) => result(() => merges.waitFor(mergeRunId, why)),
+    // C4 (stage-c4-limits.md §2): «Продолжить» with the revision of a fresh snapshot; a refusal keeps its code
+    resume: async (runId) => {
+      const snap = await result(() => snapshot(runId));
+      if (!snap.ok) return snap;
+      const r = await api.command(runId, { commandId: randomUUID(), expectedRevision: snap.value.view.revision, command: { kind: "resume" } });
+      if (!r.ok) return r;
+      return r.value.status === "rejected" ? { ok: false, code: r.value.code ?? "rejected", message: "the run did not continue" } : { ok: true, value: undefined };
+    },
+    limitTurns: async (runId) => new Set((await activityLog.tail(runId, 3000)).filter((e) => typeof e.detail?.limitProvider === "string" && e.turnId).map((e) => e.turnId!)),
+    resolutionLimits: async (workspaceId, project) => {
+      const out: { runId: string; key: string; provider: string; resetsAt: number | null }[] = [];
+      for (const m of (await merges.heads([{ workspaceId, project }]))[0]?.merges ?? []) {
+        if (!m.agent?.pending) continue;
+        const w = await resolutionPause(m.agent.resolutionRunId);
+        if (w && w !== "other" && w.kind === "limit") out.push({ runId: m.agent.resolutionRunId, key: m.task.key, provider: w.provider, resetsAt: w.resetsAt });
+      }
+      return out;
+    },
     newId: () => randomUUID(),
     now: () => Date.now()
   }, async (linkId) => (await board.read()).board.autopilot?.[linkId] ?? AUTOPILOT_BUDGET);

@@ -32,6 +32,7 @@ import { StoreError, conditionTexts, createRun as storeCreateRun, openRun as sto
 import type { RunWriter, StoreIo } from "./store.ts";
 import type { AnswerSchema, SupervisorLaunch } from "./types.ts";
 import { endingDetail, sanitize } from "./activity.ts";
+import { limitEntry } from "./providerLimit.ts";
 import { readOnlyCommand } from "./readOnly.ts";
 import type { AskPerson, PermissionAsk, PermissionReply } from "./sessions.ts";
 import { startShellCheck } from "./userCheck.ts";
@@ -1246,6 +1247,10 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
     const doneFlag = action.purpose === "execute" && typeof reportValue?.done === "boolean" ? reportValue.done : null;
     const verdict = typeof reportValue?.verdict === "string" ? reportValue.verdict : null;
     const finishedTurn = result;
+    // C4 (stage-c4-limits.md §1.2): a provider's limit goes to the feed before the turn's end and the pause, so the
+    // board's autopilot never sees the pause without it
+    const limit = result.outcome !== "completed" && result.transport?.limit?.hit ? limitEntry(result.transport.limit, clock()) : null;
+    if (limit) observe(() => watched?.limit(limit.text, limit.detail));
     observe(() => watched?.finished(finishedTurn.outcome, {
       purpose: action.purpose, report: finishedTurn.report.status, reportedDone: doneFlag, verdict,
       question: typeof reportValue?.question === "string" && reportValue.question.trim() !== "",

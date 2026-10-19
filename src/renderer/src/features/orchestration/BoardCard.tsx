@@ -4,10 +4,10 @@
 import { useState } from "react";
 import type { LocaleId, SessionBounds } from "../../../../shared/contracts";
 import type { OrchestrationAgentLink } from "../../../../shared/orchestration";
-import { AUTOPILOT_BUDGET, conflictsOf, isCopy, startBase, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
-import { t } from "../../lib/i18n";
+import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, isCopy, startBase, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
+import { t, type TranslationKey } from "../../lib/i18n";
 import { Dialog } from "./OrchestrationDialogs";
-import { ACTIVE_STATUSES } from "./runModel";
+import { ACTIVE_STATUSES, providerName, resetTime } from "./runModel";
 import { ASKS_HINT_OVER, askCount, permissionLine, stopText, taskLine, tr } from "./boardModel";
 import { conditionsLine, costLine, findingsLine } from "./runStatus";
 import type { AgentCanvasUi } from "./useAgentCanvasUi";
@@ -122,7 +122,7 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                   const run = runId ? orch.runs[runId] : undefined;
                   const entries = runId ? orch.activity[runId]?.entries ?? [] : [];
                   const fact = runId ? view?.facts.find((f) => f.runId === runId) : undefined;
-                  const base = taskLine(locale, st, run ? { view: run.view, entries, open: run.open } : null, fact?.limit ?? null);
+                  const base = taskLine(locale, st, run ? { view: run.view, entries, open: run.open } : null, fact?.limit ?? null, fact?.providerLimit ?? null);
                   // what is asked, in the request's own words and the CLI's reason (answered in the run panel: one home for answers)
                   const line = st.reason === "waits_permission" ? permissionLine(locale, base, run?.view.permission) : base;
                   // without checks, the conditions are met by the agents' word only
@@ -355,7 +355,8 @@ function AutopilotRow({ locale, state, project, many, onSet, onBudget }: {
       {state?.on ? (
         <>
           <strong data-board-autopilot-on>{t(locale, "boardApOn")}</strong>
-          {state.waits && <span data-board-autopilot-waits={state.waits}>{tr(locale, `boardApWaits_${state.waits}`)}</span>}
+          {state.waits && <span data-board-autopilot-waits={state.waits}>{state.waits === "provider_limit" && state.limit ? limitText(locale, state.limit) : tr(locale, `boardApWaits_${state.waits}`)}</span>}
+          {state.resumed && state.waits !== "provider_limit" && <span data-board-autopilot-resumed={state.resumed.key}>{tr(locale, "boardApResumed", { key: state.resumed.key, time: resetTime(locale, Date.parse(state.resumed.at)) })}</span>}
           <span data-board-autopilot-parallel>{tr(locale, "boardApOnParallel", { n: parallelOf(budget) })}</span>
           <span data-board-autopilot-conflicts={conflictsOf(budget)}>{`${t(locale, "boardApConflicts")}: ${t(locale, `boardApConflicts_${conflictsOf(budget)}`)}`}</span>
           <span data-board-autopilot-used>{tr(locale, "boardApUsed", { runs: state.used.runs, maxRuns: budget.runs, minutes: state.used.minutes, maxMinutes: budget.minutes })}</span>
@@ -384,6 +385,26 @@ function AutopilotRow({ locale, state, project, many, onSet, onBudget }: {
       )}
     </div>
   );
+}
+
+// C4 (stage-c4-limits.md §5): what the autopilot waits for at a provider's limit
+function limitText(locale: LocaleId, l: AutopilotLimit): string {
+  const others = l.others ? tr(locale, "boardApLimitOthers", { n: l.others }) : "";
+  const vars = { provider: providerName(l.provider), key: l.key, others };
+  if (l.repeated) return tr(locale, "boardApWaits_provider_limit_repeated", vars);
+  return l.resetsAt === null ? tr(locale, "boardApWaits_provider_limit_unknown", vars) : tr(locale, "boardApWaits_provider_limit", { ...vars, time: resetTime(locale, l.resetsAt) });
+}
+// C4 (§3): the resolution run under way waits — at a provider's limit or for the person
+function agentWaitsText(locale: LocaleId, key: string, w: NonNullable<NonNullable<BoardMerge["agent"]>["waits"]>): string {
+  if (w.kind === "person") return tr(locale, "boardHeadAgentPerson", { key });
+  return w.resetsAt === null ? tr(locale, "boardHeadAgentLimitUnknown", { key, provider: providerName(w.provider) })
+    : tr(locale, "boardHeadAgentLimit", { key, provider: providerName(w.provider), time: resetTime(locale, w.resetsAt) });
+}
+// C3/C4: the detail of «the agent did not resolve it»; paused:<reason> names the pause as a run's reason reads
+function agentWhyDetail(locale: LocaleId, detail: string | null): string {
+  if (!detail?.startsWith("paused:")) return detail ?? "";
+  const reason = detail.slice(7);
+  return t(locale, `orchReason_${reason}` as TranslationKey) || reason;
 }
 
 // C3: what a paused merge may be handed to an agent from (the application still refuses a lock file, a task not from the head)
@@ -437,9 +458,10 @@ function HeadRow({ locale, head, tasks, statuses, facts, board, workspaceId, say
       <div className="board-card__head-line">
         <strong data-board-head-tasks>{keys.length ? tr(locale, "boardHeadTasks", { keys: keys.join(", ") }) : t(locale, "boardHeadEmpty")}</strong>
         {checks && <span data-board-head-checks={merged.some((m) => m.completion === "no_checks") ? "none" : "passed"}>{` · ${checks}`}</span>}
+        {going?.agent?.pending && going.agent.waits && <span data-board-head-agent-waits={going.agent.waits.kind}>{` · ${agentWaitsText(locale, nameOf(going), going.agent.waits)}`}</span>}
         {going && !going.agent?.pending && <span data-board-head-merging>{` · ${tr(locale, "boardHeadMerging", { key: nameOf(going) })}`}</span>}
         {/* C3: an agent resolves the conflict — its resolution run opens from here (it is on no link) */}
-        {going?.agent?.pending && <span data-board-head-agent={going.agent.resolutionRunId}>{` · ${tr(locale, "boardHeadAgent", { key: nameOf(going) })} `}
+        {going?.agent?.pending && <span data-board-head-agent={going.agent.resolutionRunId}>{going.agent.waits ? " " : ` · ${tr(locale, "boardHeadAgent", { key: nameOf(going) })} `}
           <button type="button" data-board-head-agent-open onClick={() => openRun(going.agent!.resolutionRunId)}>{t(locale, "orchOpenRun")}</button></span>}
         <span className="board-card__header-actions">
           {keys.length > 0 && <button type="button" data-board-head-branch onClick={() => setAsking("branch")}>{t(locale, "boardHeadBranch")}</button>}
@@ -475,7 +497,7 @@ function HeadRow({ locale, head, tasks, statuses, facts, board, workspaceId, say
           <strong>{tr(locale, "boardMergeWaits", { key: nameOf(waits), why: tr(locale, `boardMergeReason_${waits.reason}`) || String(waits.reason) })}</strong>
           {waits.conflicts.length > 0 && <p data-board-merge-conflicts>{tr(locale, "boardMergeConflictFiles", { files: waits.conflicts.join(", ") })}</p>}
           {waits.reason === "merge_checks_failed" && <p>{t(locale, "boardMergeChecksFailed")}</p>}
-          {waits.reason === "merge_agent_failed" && <p data-board-merge-agent-why={waits.detail ?? ""}>{tr(locale, `boardMergeAgentWhy_${(waits.detail ?? "failed").split(":")[0]}`, { detail: waits.detail ?? "" }) || waits.detail}</p>}
+          {waits.reason === "merge_agent_failed" && <p data-board-merge-agent-why={waits.detail ?? ""}>{tr(locale, `boardMergeAgentWhy_${(waits.detail ?? "failed").split(":")[0]}`, { detail: agentWhyDetail(locale, waits.detail) }) || waits.detail}</p>}
           {waits.agent && <p>
             <button type="button" data-board-merge-agent-open onClick={() => openRun(waits.agent!.resolutionRunId)}>{t(locale, "boardMergeAgentOpen")}</button></p>}
           <p className="orch-hint">{t(locale, "boardMergeHow")}</p>

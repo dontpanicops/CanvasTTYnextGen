@@ -4,13 +4,13 @@
 import type { OrchestrationActivityEntry, OrchestrationRunView } from "../../../../shared/orchestration.ts";
 import type { LocaleId, NotificationSettings } from "../../../../shared/contracts.ts";
 import { t } from "../../lib/i18n.ts";
-import { PAUSES, viewPauseLabel } from "./runModel.ts";
+import { PAUSES, providerName, viewPauseLabel } from "./runModel.ts";
 import { stopText, tr } from "./boardModel.ts";
-import type { AutopilotState } from "../../../../shared/taskBoard.ts";
+import type { AutopilotState, BoardHead } from "../../../../shared/taskBoard.ts";
 
 export type NotifySignal = "waiting" | "completed" | "completed_no_checks" | "failed";
 export type NotifyPrefs = NotificationSettings;
-export const DEFAULT_NOTIFY_PREFS: NotifyPrefs = { waiting: true, completed: true, failed: true, dockBadge: true, bounce: false, board: true };
+export const DEFAULT_NOTIFY_PREFS: NotifyPrefs = { waiting: true, completed: true, failed: true, dockBadge: true, bounce: false, board: true, boardHead: false };
 
 // The state a notification is about, with what tells one state from another ("" — nothing to tell).
 export function runSignal(view: OrchestrationRunView, onMac = true): { signal: NotifySignal; key: string } | null {
@@ -81,4 +81,49 @@ export function boardNotes(locale: LocaleId, autopilot: Readonly<Record<string, 
     notes.push({ runId: id, signal: s.stop.code === "all_done" ? "completed" : "failed", title: title.slice(0, 120), body: place(linkId) });
   }
   return { notes, notified: next };
+}
+
+// C4 (stage-c4-limits.md §4): the board's own notes — a merge that waits for the person (once per merge and reason), the
+// autopilot continuing a run after a provider's limit (once per continuation), and, when asked for, the board's result
+// moved (once per commit, with the tasks merged since the last one told). Their keys are kept with the runs' record, so a
+// restart repeats none; a merge or a head seen for the first time is only recorded. waiting: the merges that wait for
+// the person, for the Dock badge. A merge's note opens the board (merge-<runId>), a continuation its run.
+const MERGE_WAITS = new Set(["merge_conflict", "merge_checks_failed", "merge_agent_failed", "merge_budget"]);
+export function boardHeadNotes(locale: LocaleId, heads: readonly BoardHead[], autopilot: Readonly<Record<string, AutopilotState>>, notified: Readonly<Record<string, string>>,
+  prefs: NotifyPrefs, focused: boolean, place: (project: string) => string): { notes: Note[]; notified: Record<string, string>; waiting: number } {
+  const next: Record<string, string> = { ...notified };
+  const notes: Note[] = [];
+  let waiting = 0;
+  const tell = prefs.board && !focused;
+  for (const h of heads) {
+    const title = place(h.project);
+    for (const m of h.merges) {
+      const waits = m.status === "paused" && MERGE_WAITS.has(m.reason ?? "");
+      if (waits) waiting++;
+      const id = `merge:${m.runId}`;
+      const before = notified[id];
+      next[id] = waits ? m.reason! : "";
+      if (!waits || before === undefined || before === m.reason || !tell) continue;
+      notes.push({ runId: `merge-${m.runId}`, signal: "waiting", title, body: tr(locale, `boardNoteMerge_${m.reason}`, { key: m.task.key }).slice(0, 240) });
+    }
+    // the merges come newest first; the completed ones since the last told
+    const done = h.merges.filter((m) => m.status === "completed" && m.reason !== "already");
+    const id = `head:${h.ref}`;
+    const before = notified[id];
+    const last = done.length ? Math.max(...done.map((m) => m.createdAt)) : 0;
+    next[id] = String(last);
+    if (before === undefined || Number(before) >= last || !tell || !prefs.boardHead) continue;
+    const keys = [...done].filter((m) => m.createdAt > Number(before)).reverse().map((m) => (m.source === "head" ? "HEAD" : m.task.key));
+    const checked = done.every((m) => m.completion === "confirmed");
+    notes.push({ runId: `head-${h.n}-${last}`.slice(0, 80), signal: "completed", title,
+      body: tr(locale, checked ? "boardNoteHead" : "boardNoteHeadNoChecks", { keys: keys.join(", ") }).slice(0, 240) });
+  }
+  for (const [linkId, s] of Object.entries(autopilot)) {
+    const id = `resumed:${linkId}`;
+    const before = notified[id];
+    next[id] = s.resumed?.at ?? before ?? "";
+    if (!s.resumed || before === undefined || before === s.resumed.at || !tell) continue;
+    notes.push({ runId: s.resumed.runId, signal: "completed", title: tr(locale, "boardNoteResumed", { key: s.resumed.key }).slice(0, 120), body: providerName(s.resumed.provider) });
+  }
+  return { notes, notified: next, waiting };
 }

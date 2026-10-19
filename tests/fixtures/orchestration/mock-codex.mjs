@@ -280,6 +280,16 @@ async function appServer(args) {
         await emit({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "failed", items: [], error: { message: "mock failure" } } } });
         continue;
       }
+      // C4: a scripted step {"__limit": {"resetsAt": <seconds> | null}} is a turn the account's limit ends, as
+      // codex-cli 0.162.0's app-server schema says: the used-up window, then error with codexErrorInfo, then the failed turn
+      if (script?.answer?.__limit) {
+        const resetsAt = script.answer.__limit.resetsAt ?? null;
+        const message = "You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.";
+        if (resetsAt !== null) await emit({ method: "account/rateLimits/updated", params: { rateLimits: { primary: { usedPercent: 100, resetsAt, windowDurationMins: 300 }, secondary: null } } });
+        await emit({ method: "error", params: { threadId, turnId, willRetry: false, error: { message, codexErrorInfo: "usageLimitExceeded" } } });
+        await emit({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "failed", items: [], error: { message, codexErrorInfo: "usageLimitExceeded" } } } });
+        continue;
+      }
       if (MODE === "usage_limit") {
         // The account's usage limit, as codex-cli 0.155.1 ended a real turn (evidence/real-stage-13/series-S3-S5-S6-attempt2,
         // codex-turn-error.jsonl): an error notification, then the turn failed with the same message; the process exits 0.

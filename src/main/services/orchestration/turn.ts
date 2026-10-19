@@ -534,6 +534,7 @@ export function startTurn(spec: TurnSpec, launch: SupervisorLaunch, observer?: T
         droppedEventBytes: collector.droppedEventBytes, stderrBytes, stderrDroppedBytes, droppedDiagnostics
       },
       history: collector.events,
+      limit: collector.limit,
       terminal: t ? { type: t.type, index: t.index, at: t.at } : null,
       errors: collector.errors,
       stderr: { head: Buffer.concat(errHead).toString("utf8"), tail: errTail.toString("utf8"), bytes: stderrBytes, droppedBytes: stderrDroppedBytes },
