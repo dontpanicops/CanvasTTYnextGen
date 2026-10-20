@@ -8,7 +8,7 @@ import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, isCopy, startBase, 
 import { t, type TranslationKey } from "../../lib/i18n";
 import { Dialog } from "./OrchestrationDialogs";
 import { ACTIVE_STATUSES, providerName, resetTime } from "./runModel";
-import { ASKS_HINT_OVER, askCount, permissionLine, stopText, taskLine, tr } from "./boardModel";
+import { ASKS_HINT_OVER, askCount, permissionLine, splitActions, stopText, subtaskInfo, taskLine, tr, unsplit } from "./boardModel";
 import { conditionsLine, costLine, findingsLine } from "./runStatus";
 import type { AgentCanvasUi } from "./useAgentCanvasUi";
 import type { Board } from "./useBoard";
@@ -81,6 +81,17 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
   const [over, setOver] = useState<string | null>(null); // C2: «Запустить сейчас сверх лимита» asked for this task
   const queueAct = async (action: "run" | "cancel", task: BoardTask) => { setOver(null); const f = failure(await board.queue(action, task.id)); if (f) say(task.id, f); };
   const mergeTask = async (task: BoardTask) => { setMerging(null); const f = failure(await board.merge(task.id, language)); if (f) say(task.id, f); };
+  // E4 (stage-e-decomposition.md §10): «Split» / «Split again» start the decomposition run; «Do it whole» takes the mark off
+  const splitAct = async (task: BoardTask, action: "decompose" | "whole") => {
+    const f = failure(await (action === "decompose" ? board.decompose(task.id, language) : board.update(task.id, { decompose: false })));
+    if (f) say(task.id, f);
+  };
+  // a subtask's key links to its card (a parent's to the parent's)
+  const goTo = (key: string) => {
+    const el = document.querySelector<HTMLElement>(`[data-board="${workspaceId}"] [data-board-task="${key}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+    el?.querySelector<HTMLElement>(".board-task__title")?.focus();
+  };
 
   return (
     <article className={`board-card ${props.selected ? "board-card--selected" : ""}`} data-interactive="true" data-board={workspaceId}
@@ -120,11 +131,13 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                   const st = board.statuses.get(task.id)!;
                   const runId = st.current;
                   const run = runId ? orch.runs[runId] : undefined;
+                  // E4: a parent has no run of its own — its line, answer and «Open the split» follow its decomposition run
+                  const lineId = runId ?? st.split?.runId ?? null;
                   const entries = runId ? orch.activity[runId]?.entries ?? [] : [];
-                  const fact = runId ? view?.facts.find((f) => f.runId === runId) : undefined;
+                  const fact = lineId ? view?.facts.find((f) => f.runId === lineId) : undefined;
                   const base = taskLine(locale, st, run ? { view: run.view, entries, open: run.open } : null, fact?.limit ?? null, fact?.providerLimit ?? null);
                   // what is asked, in the request's own words and the CLI's reason (answered in the run panel: one home for answers)
-                  const line = st.reason === "waits_permission" ? permissionLine(locale, base, run?.view.permission) : base;
+                  const line = st.reason === "waits_permission" ? permissionLine(locale, base, (lineId ? orch.runs[lineId] : undefined)?.view.permission) : base;
                   // without checks, the conditions are met by the agents' word only
                   const met = run ? conditionsLine(locale, run.view) : null;
                   // shown once the run's feed is here: «0» before it loads would be a guess
@@ -148,6 +161,10 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                   // C2: a start waiting for a place (decision 12), and the files it shares with others (§4.7)
                   const queued = view?.queued?.find((q) => q.taskId === task.id);
                   const overlaps = board.overlaps.get(task.id) ?? [];
+                  // E4 (§10): a parent's row of §2.1, its subtasks; a subtask's parent
+                  const acts = splitActions(task, st);
+                  const subs = view ? subtaskInfo(task, tasks, board.statuses, view.facts, view.heads ?? []) : null;
+                  const parent = task.parentId ? tasks.find((x) => x.id === task.parentId) : undefined;
                   return (
                     <li key={task.id} className={`board-task board-task--${st.column}${st.done ? ` board-task--done-${st.done}` : ""}`}
                       data-board-task={task.key} data-board-task-column={st.column} data-board-done={st.done ?? undefined} data-board-reason={st.reason ?? undefined}>
@@ -162,6 +179,14 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                       {facts && <div className="board-task__line board-task__facts" data-board-facts title={facts}>{facts}</div>}
                       {asks > ASKS_HINT_OVER && <div className="board-task__line board-task__hint" data-board-asks-hint>{t(locale, "boardAsksHint")}</div>}
                       {st.depsNote && <div className="board-task__line board-task__hint" data-board-deps-note={st.depsNote}>{t(locale, `boardDepsNote_${st.depsNote}`)}</div>}
+                      {parent && <div className="board-task__line" data-board-part-of={parent.key}>
+                        <button type="button" className="board-task__link" onClick={() => goTo(parent.key)}>{tr(locale, "boardPartOf", { key: parent.key })}</button>
+                        {parent.archivedAt && <span data-board-parent-archived>{` · ${t(locale, "boardParentArchived")}`}</span>}</div>}
+                      {parent && task.covers?.length ? <div className="board-task__line board-task__hint" data-board-covers>{tr(locale, "boardCovers", { ids: task.covers.join(", "), key: parent.key })}</div> : null}
+                      {subs && <div className="board-task__line" data-board-subtasks={`${subs.done}/${subs.live.length}`}>{tr(locale, "boardSubtasks", { done: subs.done, n: subs.live.length })}
+                        {subs.live.map((x) => <button key={x.id} type="button" className="board-task__link" data-board-subtask-link={x.key} onClick={() => goTo(x.key)}>{` ${x.key}`}</button>)}</div>}
+                      {subs?.archived.map((x) => <div key={x.id} className="board-task__line board-task__hint" data-board-subtask-archived={x.key}>{tr(locale, "boardSubtaskArchived", { key: x.key })}</div>)}
+                      {subs?.criteriaChanged && <div className="board-task__line board-task__hint" data-board-criteria-changed>{t(locale, "boardCriteriaChanged")}</div>}
                       {after && <div className="board-task__line" data-board-after title={after}>{after}</div>}
                       {markText && <div className="board-task__line" data-board-merge-mark={mark!.kind === "in_board" && mark!.already ? "already" : mark!.kind} title={markText}>{markText}</div>}
                       {queued && !queued.failed && <div className="board-task__line" data-board-queued title={tr(locale, "boardQueued", { busy: queued.busy, limit: queued.limit })}>
@@ -219,9 +244,15 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                                 <button type="button" data-board-over onClick={() => setOver(task.id)}>{t(locale, "boardQueuedOver")}</button>
                                 <button type="button" data-board-queue-cancel onClick={() => void queueAct("cancel", task)}>{t(locale, "boardQueuedCancel")}</button>
                               </>}
-                              {(st.column === "queue" || st.reason === "no_checks") && st.reason !== "run_newer" && !(queued && !queued.failed) && (st.depsWait
+                              {(st.column === "queue" || st.reason === "no_checks") && st.reason !== "run_newer" && !(queued && !queued.failed) && !unsplit(task, st) && (st.depsWait
                                 ? <button type="button" data-board-start-anyway onClick={() => setAnyway(task.id)}>{t(locale, "boardStartAnyway")}</button>
                                 : <button type="button" data-board-start onClick={() => start(task)}>{t(locale, st.attempts ? "boardStartAgain" : "boardStart")}</button>)}
+                              {/* E4: the actions of a parent's row (§2.1); «Stop» is the split run's panel's */}
+                              {acts.includes("run") && <button type="button" className="orch-primary" data-board-decompose onClick={() => void splitAct(task, "decompose")}>{t(locale, "boardDecomposeRun")}</button>}
+                              {acts.includes("again") && <button type="button" className="orch-primary" data-board-decompose-again onClick={() => void splitAct(task, "decompose")}>{t(locale, "boardDecomposeAgain")}</button>}
+                              {acts.includes("whole") && <button type="button" data-board-decompose-whole onClick={() => void splitAct(task, "whole")}>{t(locale, "boardDecomposeWhole")}</button>}
+                              {acts.includes("answer") && st.split && <button type="button" className="orch-primary" data-board-split-answer onClick={() => ui.openRunById(st.split!.runId)}>{t(locale, "boardAnswer")}</button>}
+                              {acts.includes("open") && st.split && <button type="button" data-board-split-open onClick={() => ui.openRunById(st.split!.runId)}>{t(locale, "boardDecomposeOpen")}</button>}
                               {runId && st.reason === "waits_permission"
                                 ? <button type="button" className="orch-primary" data-board-open data-board-answer onClick={() => ui.openRunById(runId)}>{t(locale, "boardAnswer")}</button>
                                 : runId && <button type="button" data-board-open onClick={() => ui.openRunById(runId)}>{t(locale, "orchOpenRun")}</button>}
@@ -253,12 +284,13 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
           {...frame.handle(direction)} />
       ))}
       {form && (
-        <TaskForm locale={locale} task={form.task} tasks={tasks.filter((x) => !x.archivedAt)} projects={projects}
+        <TaskForm locale={locale} task={form.task} splitLocked={!!form.task && ((board.statuses.get(form.task.id)?.attempts ?? 0) > 0 || tasks.some((x) => x.parentId === form.task!.id && !x.archivedAt))} tasks={tasks.filter((x) => !x.archivedAt)} projects={projects}
           dependents={form.task ? tasks.filter((x) => x.dependsOn.includes(form.task!.id)) : []}
           onClose={() => setForm(null)}
           onSave={async (input) => {
-            const r = form.task ? await board.update(form.task.id, { title: input.title, text: input.text, criteria: input.criteria, dependsOn: input.dependsOn })
-              : await board.create({ workspaceId, ...input });
+            const { decompose, ...rest } = input;
+            const r = form.task ? await board.update(form.task.id, { title: input.title, text: input.text, criteria: input.criteria, dependsOn: input.dependsOn, ...(decompose !== !!form.task.decompose ? { decompose } : {}) })
+              : await board.create({ workspaceId, ...rest, ...(decompose ? { decompose } : {}) });
             const f = failure(r);
             if (!f) setForm(null);
             return f;
@@ -274,9 +306,9 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
 }
 
 // «New task» / «Edit task»: the goal's fields without a start (§6). main checks the rest (lengths, cycles, the folder).
-function TaskForm({ locale, task, tasks, projects, dependents, onClose, onSave, onDelete }: {
-  locale: LocaleId; task: BoardTask | null; tasks: BoardTask[]; projects: string[]; dependents: BoardTask[]; onClose(): void;
-  onSave(input: { project: string; title: string; text: string; criteria: string[]; dependsOn: string[] }): Promise<string | null>;
+function TaskForm({ locale, task, splitLocked, tasks, projects, dependents, onClose, onSave, onDelete }: {
+  locale: LocaleId; task: BoardTask | null; splitLocked: boolean; tasks: BoardTask[]; projects: string[]; dependents: BoardTask[]; onClose(): void;
+  onSave(input: { project: string; title: string; text: string; criteria: string[]; dependsOn: string[]; decompose: boolean }): Promise<string | null>;
   // dependents: the tasks shown as losing this dependency (§4.2: removed openly, never on the quiet)
   onDelete?: (dependents: string[]) => Promise<string | null>;
 }): React.JSX.Element {
@@ -286,6 +318,7 @@ function TaskForm({ locale, task, tasks, projects, dependents, onClose, onSave, 
   const [criteria, setCriteria] = useState(task?.criteria.join("\n") ?? "");
   const [project, setProject] = useState(task?.project ?? projects[0] ?? "");
   const [depends, setDepends] = useState<string[]>(task?.dependsOn ?? []);
+  const [decompose, setDecompose] = useState(!!task?.decompose); // E4 (§10)
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const lines = criteria.split("\n").map((c) => c.trim()).filter(Boolean);
@@ -297,7 +330,7 @@ function TaskForm({ locale, task, tasks, projects, dependents, onClose, onSave, 
         event.preventDefault();
         if (!complete) return;
         setBusy(true);
-        setError(await onSave({ project: project.trim(), title: title.trim(), text: text.trim(), criteria: lines, dependsOn: depends }));
+        setError(await onSave({ project: project.trim(), title: title.trim(), text: text.trim(), criteria: lines, dependsOn: depends, decompose }));
         setBusy(false);
       }}>
         {task && <div className="orch-field orch-field--static"><span>{t(locale, "boardTask")}</span><strong>{task.key}</strong></div>}
@@ -310,6 +343,9 @@ function TaskForm({ locale, task, tasks, projects, dependents, onClose, onSave, 
         <label className="orch-field"><span>{t(locale, "boardFieldProject")}</span>
           <input data-board-field="project" value={project} list="board-projects" disabled={!!task} onChange={(e) => setProject(e.target.value)} />
           <datalist id="board-projects">{projects.map((p) => <option key={p} value={p} />)}</datalist></label>
+        {/* E4 (§10): not for a subtask; not while the task has its own run or live subtasks */}
+        {!task?.parentId && <label className="orch-field orch-field--check"><input type="checkbox" data-board-field="decompose" checked={decompose} disabled={splitLocked}
+          onChange={(e) => setDecompose(e.target.checked)} /> {t(locale, "boardDecompose")}</label>}
         {(
           <fieldset className="orch-field board-form__depends"><legend>{t(locale, "boardFieldDepends")}</legend>
             {others.length === 0 && <small className="orch-hint">{t(locale, "boardNoOtherTasks")}</small>}
@@ -357,6 +393,7 @@ function AutopilotRow({ locale, state, project, many, onSet, onBudget }: {
           <strong data-board-autopilot-on>{t(locale, "boardApOn")}</strong>
           {state.waits && <span data-board-autopilot-waits={state.waits}>{state.waits === "provider_limit" && state.limit ? limitText(locale, state.limit) : tr(locale, `boardApWaits_${state.waits}`)}</span>}
           {state.resumed && state.waits !== "provider_limit" && <span data-board-autopilot-resumed={state.resumed.key}>{tr(locale, "boardApResumed", { key: state.resumed.key, time: resetTime(locale, Date.parse(state.resumed.at)) })}</span>}
+          {state.splitting && <span data-board-autopilot-splitting={state.splitting}>{tr(locale, "boardApDecomposing", { key: state.splitting })}</span>}
           <span data-board-autopilot-parallel>{tr(locale, "boardApOnParallel", { n: parallelOf(budget) })}</span>
           <span data-board-autopilot-conflicts={conflictsOf(budget)}>{`${t(locale, "boardApConflicts")}: ${t(locale, `boardApConflicts_${conflictsOf(budget)}`)}`}</span>
           <span data-board-autopilot-used>{tr(locale, "boardApUsed", { runs: state.used.runs, maxRuns: budget.runs, minutes: state.used.minutes, maxMinutes: budget.minutes })}</span>

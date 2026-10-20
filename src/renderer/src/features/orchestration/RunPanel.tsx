@@ -1087,16 +1087,21 @@ function useCreatedDocs(locale: LocaleId, runId: string, seq: number, skip: bool
   return { docs, retry: () => setAttempt((n) => n + 1) };
 }
 
+const splitRef = (r: OrchestrationHistoryRecord) => ((r.data.proposal ?? r.data.reasons ?? r.data.why) as TextRef | undefined)?.sha256;
+
 function RunDocs({ kind, orch, runId, view, records, locale, task, take, seq, incomplete, onNote }: {
   kind: "plan" | "result"; orch: Orchestration; runId: string; view: OrchestrationRunView; records: readonly OrchestrationHistoryRecord[];
   locale: LocaleId; task: { key: string; title: string } | null; take: OrchestrationTake | null; seq: number; incomplete: boolean; onNote?: (markdown: string, source: { runId: string; doc: "plan" | "result" }) => void;
 }): React.JSX.Element {
   const planRecords = useMemo(() => records.filter((r) => r.type === "plan.recorded"), [records]);
   // an executor's or reviewer's report is the ref of a finished turn (as summaryModel reads it)
+  // E4 (stage-e-decomposition.md §10): a decomposition run's answers on the Plan tab
+  const splitRecords = useMemo(() => records.filter((r) => r.type === "decomposition.proposed" || r.type === "decomposition.rejected" || r.type === "decomposition.whole"), [records]);
   const shas = useMemo(() => [
     ...planRecords.map((r) => (r.data.plan as TextRef | undefined)?.sha256),
+    ...splitRecords.map(splitRef),
     ...records.filter((r) => r.type === "turn.finished").map((r) => (r.data.report as { ref?: TextRef } | undefined)?.ref?.sha256)
-  ].filter((x): x is string => typeof x === "string"), [planRecords, records]);
+  ].filter((x): x is string => typeof x === "string"), [planRecords, records, splitRecords]);
   useEffect(() => { for (const sha of shas) orch.loadText(runId, sha); }, [orch.loadText, shas, runId]);
   const textOf = (sha: string): Loaded<string> => { const s = orch.texts[sha]; return s?.status === "ready" ? s.text : s?.status === "error" ? "error" : "loading"; };
   const goalStored = useStored(orch, runId, (records.find((r) => r.type === "run.created")?.data.goal as TextRef | undefined)?.sha256);
@@ -1120,11 +1125,12 @@ function RunDocs({ kind, orch, runId, view, records, locale, task, take, seq, in
     });
     const g = goalText === null ? (goalStored.status === "error" || goalStored.status === "none" ? null : "loading") : parseGoal(goalText);
     const input: DocInput = {
-      view, model, task, plans, take, asOf: new Date().toISOString(), report: textOf,
+      view, model, task, plans, take,
+      split: splitRecords.map((r) => ({ kind: r.type.slice(14) as "proposed" | "rejected" | "whole", text: textOf(splitRef(r) ?? "") })), asOf: new Date().toISOString(), report: textOf,
       goal: g === "loading" ? "loading" : g ? { text: typeof g.text === "string" ? g.text : null } : { text: goalText }
     };
     return kind === "plan" ? planDoc(input, locale) : resultDoc(input, created.docs, locale);
-  }, [kind, view, records, planRecords, textsKey, goalText, goalStored.status, task, take, created.docs, incomplete, locale]);
+  }, [kind, view, records, planRecords, splitRecords, textsKey, goalText, goalStored.status, task, take, created.docs, incomplete, locale]);
   return <>
     <RunDocView doc={doc} kind={kind} locale={locale} onNote={onNote && ((md) => onNote(md, { runId, doc: kind }))} />
     {kind === "result" && (created.docs.state === "error" || (created.docs.state === "ready" && created.docs.files.some((f) => f.why === "unavailable"))) && <button type="button" data-run-doc-retry onClick={created.retry}>{t(locale, "orchRepeat")}</button>}

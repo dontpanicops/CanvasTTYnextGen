@@ -26,10 +26,14 @@ export function useBoard(orch: Orchestration) {
     return () => window.clearTimeout(id);
   }, [runs, reload]);
 
+  // C2: a place with the board's merged head waits for its dependencies there (decision 9)
+  const statuses = useMemo(() => (view ? boardStatuses(view.board, view.facts, view.heads ?? []) : new Map<string, TaskStatus>()), [view]);
   // B4: while an autopilot of a link is on, its steps (a take, a stop) may change nothing the runs show: read every 2 s
   const anyOn = !!view && (Object.values(view.autopilot ?? {}).some((s) => s.on)
     || !!view.heads?.some((h) => h.merges.some((m) => m.status === "preparing" || m.status === "running")) // C1: a merge has no run on a link
-    || !!view.queued?.some((q) => !q.failed)); // C2: a start in the queue begins in main when a place frees
+    || !!view.queued?.some((q) => !q.failed) // C2: a start in the queue begins in main when a place frees
+    // E4: a decomposition run is on no link and in no run list: its card (going on, a question, a pause) is read again
+    || [...statuses.values()].some((x) => !!x.split && ["decomposing", "decomposition_paused", "waits_answer", "waits_permission"].includes(x.reason ?? "")));
   useEffect(() => {
     if (!anyOn) return;
     const id = window.setInterval(() => void reload(), 2000);
@@ -49,8 +53,6 @@ export function useBoard(orch: Orchestration) {
     void reloadCanvas();
   }, [view, canvas, reloadCanvas]);
 
-  // C2: a place with the board's merged head waits for its dependencies there (decision 9)
-  const statuses = useMemo(() => (view ? boardStatuses(view.board, view.facts, view.heads ?? []) : new Map<string, TaskStatus>()), [view]);
   const overlaps = useMemo(() => (view ? overlapsOf(view.board, view.facts, statuses, view.heads ?? []) : new Map<string, Overlap[]>()), [view, statuses]);
   // C2: a start that went to the queue changes no run: the goal dialog says so
   useEffect(() => {
@@ -80,6 +82,8 @@ export function useBoard(orch: Orchestration) {
     place: (workspaceId: string, bounds: SessionBounds | null) => act(() => api.boardPlace(workspaceId, bounds)),
     autopilot: (linkId: string, on: boolean, language: "ru" | "en") => act(() => api.boardAutopilot(linkId, on, language)),
     budget: (linkId: string, budget: AutopilotBudget | null) => act(() => api.boardBudget(linkId, budget)),
+    // E4: «Split» / «Split again» (stage-e-decomposition.md §2.1)
+    decompose: (taskId: string, language: "ru" | "en") => act(() => api.boardDecompose(taskId, language)),
     // C1: merges into the board's merged head and the person's actions on it
     merge: (taskId: string, language: "ru" | "en") => act(() => api.boardMerge(taskId, language)),
     mergeAll: (workspaceId: string, project: string, language: "ru" | "en") => act(() => api.boardMergeAll(workspaceId, project, language)),

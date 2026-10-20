@@ -6,7 +6,7 @@ import type { LocaleId, NotificationSettings } from "../../../../shared/contract
 import { t } from "../../lib/i18n.ts";
 import { PAUSES, providerName, viewPauseLabel } from "./runModel.ts";
 import { stopText, tr } from "./boardModel.ts";
-import type { AutopilotState, BoardHead } from "../../../../shared/taskBoard.ts";
+import { boardStatuses, type AutopilotState, type Board, type BoardHead, type RunTaskFacts } from "../../../../shared/taskBoard.ts";
 
 export type NotifySignal = "waiting" | "completed" | "completed_no_checks" | "failed";
 export type NotifyPrefs = NotificationSettings;
@@ -124,6 +124,33 @@ export function boardHeadNotes(locale: LocaleId, heads: readonly BoardHead[], au
     next[id] = s.resumed?.at ?? before ?? "";
     if (!s.resumed || before === undefined || before === s.resumed.at || !tell) continue;
     notes.push({ runId: s.resumed.runId, signal: "completed", title: tr(locale, "boardNoteResumed", { key: s.resumed.key }).slice(0, 120), body: providerName(s.resumed.provider) });
+  }
+  return { notes, notified: next, waiting };
+}
+
+// E4 (stage-e-decomposition.md §10): the board's decomposition runs that wait for the person. The state of each run is
+// kept under split:<runId> — "question" (the lead asks; the same «waiting for an answer» note as runs), "failed" (the
+// parent is in decomposition_failed by that run: «The split of T-1 failed», once per run), "" otherwise. A run seen
+// for the first time is only recorded, so a restart repeats none. waiting: the splits that wait (question,
+// decomposition_failed, decomposition_paused), for the Dock badge.
+export function splitNotes(locale: LocaleId, board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], heads: readonly BoardHead[], notified: Readonly<Record<string, string>>,
+  prefs: NotifyPrefs, focused: boolean, place: (project: string) => string): { notes: Note[]; notified: Record<string, string>; waiting: number } {
+  const next: Record<string, string> = { ...notified };
+  const notes: Note[] = [];
+  let waiting = 0;
+  const statuses = boardStatuses(board, facts, heads);
+  for (const task of board.tasks) {
+    const st = statuses.get(task.id);
+    if (!task.decompose || !st?.split) continue;
+    const id = `split:${st.split.runId}`;
+    const state = st.reason === "decomposition_failed" ? "failed" : st.reason === "waits_answer" ? "question" : "";
+    if (state || st.reason === "decomposition_paused") waiting++;
+    const before = notified[id];
+    next[id] = state;
+    if (!state || before === undefined || before === state || focused || !prefs.board) continue;
+    const key = task.key;
+    notes.push({ runId: st.split.runId, signal: state === "failed" ? "failed" : "waiting", title: place(task.project),
+      body: tr(locale, state === "failed" ? "boardNoteSplitFailed" : "boardNoteSplitQuestion", { key }).slice(0, 240) });
   }
   return { notes, notified: next, waiting };
 }

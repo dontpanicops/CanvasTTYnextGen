@@ -287,7 +287,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   }, [board.view, lastOfLink, openRunInWorkspace, workspace.activeId]);
   const autopilotPlace = useCallback((linkId: string) => { const runId = lastOfLink(linkId); return runId ? noteTitle(runId) : "Raoden Loom"; }, [lastOfLink, noteTitle]);
   const notes = useRunNotifications({ locale: settings.locale, prefs: settings.notifications, runs: orch.runs, activity: orch.activity, title: noteTitle, open: openNote, accepting,
-    autopilot: board.view?.autopilot, boardPlace: autopilotPlace, heads: board.view?.heads });
+    autopilot: board.view?.autopilot, boardPlace: autopilotPlace, heads: board.view?.heads, board: board.view });
   // B2: «Board» shows the task board on a workspace's canvas, or brings it forward (C4: a board note too, in its workspace)
   showBoardRef.current = (target: string): void => {
     if (target !== workspace.activeId) workspace.switchTo(target);
