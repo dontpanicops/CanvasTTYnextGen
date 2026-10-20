@@ -1111,6 +1111,8 @@ button { border: 0; }
 .orch-field { min-width: 0; display: flex; flex-direction: column; gap: 6px; border: 0; padding: 0; margin: 0; }
 .orch-field > span:first-child, .orch-field legend { font-size: 13px; font-weight: 600; opacity: .85; }
 .orch-field input, .orch-field textarea, .orch-panel textarea, .orch-panel input, .orch-panel select { width: 100%; padding: 9px 11px; border: 0; border-radius: 10px; color: var(--text-dark); background: rgba(255,255,255,.72); font: inherit; }
+.orch-field--check { flex-direction: row; align-items: center; }
+.orch-field--check input { width: auto; }
 .orch-field--static strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
 .orch-field__row { display: flex; gap: 8px; }
 .orch-field__row button { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
@@ -1445,6 +1447,7 @@ button { border: 0; }
 .board-card .board-task__title { padding: 0; color: var(--text); background: none; text-align: left; font-weight: 800; white-space: normal; overflow-wrap: anywhere; }
 .board-task__key { font: 800 .85em/1 var(--font-mono); color: var(--text-muted-on-dark); }
 .board-task__line { min-width: 0; overflow-wrap: anywhere; color: var(--text-muted-on-dark); font-size: .86em; }
+.board-task__link { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 .board-task__line[data-board-line] { color: var(--text); font-weight: 700; white-space: normal; overflow-wrap: anywhere; }
 .board-task__badge { margin-right: .35em; padding: 0 .35em; border-radius: 6px; font-weight: 900; }
 .board-task__badge--confirmed { color: var(--text-dark); background: var(--success); }

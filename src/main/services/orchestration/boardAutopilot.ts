@@ -119,6 +119,21 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
     return out;
   }
 
+  // E4 (stage-e-decomposition.md §10): the parent's key of its latest own split that goes on (running, or proposed and
+  // not yet made into subtasks); a paused one waits for the person or the limit, not "splitting"
+  async function splittingOf(l: Live): Promise<string | null> {
+    if (!l.splits.length) return null;
+    const v = await deps.view().catch(() => null);
+    for (const id of [...l.splits].reverse()) {
+      const f = v?.facts.find((x) => x.runId === id);
+      const t = v?.board.tasks.find((x) => x.id === f?.decompositionOf);
+      if (!f || !t) continue;
+      const moving = f.status === "completed" ? f.split === "proposed" && !f.splitFailed && t.decomposedBy !== id : ["preparing", "running", "pausing", "stopping"].includes(f.status);
+      if (moving) return t.key;
+    }
+    return null;
+  }
+
   async function tick(linkId: string): Promise<void> {
     const l = live.get(linkId);
     if (!l || l.busy) return;
@@ -251,7 +266,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
         const l = live.get(id);
         const u = l ? await used(l) : { runs: 0, ms: 0 };
         out[id] = { on: !!l, budget: await budgetOf(id), used: { runs: u.runs, minutes: Math.floor(u.ms / 60_000) }, waits: l?.waits ?? null, stop: stops.get(id) ?? null,
-          limit: l?.limit ?? null, resumed: l?.resumed ?? null };
+          limit: l?.limit ?? null, resumed: l?.resumed ?? null, splitting: l ? await splittingOf(l) : null };
       }
       return out;
     },

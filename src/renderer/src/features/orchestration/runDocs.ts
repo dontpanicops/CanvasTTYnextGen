@@ -88,7 +88,11 @@ export type Loaded<T> = T | "loading" | "error";
 export interface PlanJson { stages: { title: string; task: string }[]; question: string | null }
 // one recorded plan, in journal order: version 1, 2, …; firstStage — the global number of its first stage
 export interface PlanEntry { version: number; firstStage: number; text: Loaded<PlanJson> }
+// E4 (stage-e-decomposition.md §10): what a decomposition run answered, in journal order (text: the proposal's JSON, the
+// reasons' JSON list, the lead's why)
+export interface SplitEntry { kind: "proposed" | "rejected" | "whole"; text: Loaded<string> }
 export interface DocInput {
+  split?: readonly SplitEntry[];
   view: OrchestrationRunView;
   model: RunSummaryModel;
   task: { key: string; title: string } | null;
@@ -137,13 +141,27 @@ const requirementLines = (locale: LocaleId, c: OrchestrationConditions): DocLine
 const goalLines = (locale: LocaleId, goal: DocInput["goal"]): DocLine[] =>
   [{ kind: "text", text: loaded(locale, typeof goal === "object" ? goal.text : goal) }];
 
+function splitSection(locale: LocaleId, e: SplitEntry): DocSection {
+  const say = (k: string, v: Record<string, string | number> = {}) => w(locale, k, v);
+  const heading = say(e.kind === "proposed" ? "docSplitProposal" : e.kind === "rejected" ? "docSplitRejected" : "docSplitWhole");
+  if (e.text === "loading" || e.text === "error") return { heading, lines: [{ kind: "text", text: loaded(locale, e.text) }] };
+  if (e.kind === "whole") return { heading, lines: [{ kind: "text", text: e.text, said: say("docByLead") }] };
+  try {
+    if (e.kind === "rejected") return { heading, lines: (JSON.parse(e.text) as string[]).map((r): DocLine => ({ kind: "item", mark: "not_met", text: r })) };
+    const tasks = (JSON.parse(e.text) as { tasks: { id: string; title: string; dependsOn: string[]; covers: string[] }[] }).tasks;
+    return { heading, lines: tasks.map((x): DocLine => ({ kind: "item", text: say("docSplitTask", { id: x.id, title: x.title, deps: x.dependsOn.join(", ") || say("docSplitNone"), covers: x.covers.join(", ") || say("docSplitNone") }) })) };
+  } catch { return { heading, lines: [{ kind: "text", text: say("docUnreadable") }] }; }
+}
+
 export function planDoc(input: DocInput, locale: LocaleId): RunDoc {
   const { view, model, plans } = input;
   const say = (k: string, v: Record<string, string | number> = {}) => w(locale, k, v);
   const c = view.progress?.conditions ?? null;
   const sections: DocSection[] = [{ heading: say("docGoal"), lines: goalLines(locale, input.goal) }];
   if (c) sections.push({ heading: say("docRequirements"), lines: requirementLines(locale, c) });
-  if (!model.stages?.length) sections.push({ heading: say("orchSum_stages"), lines: [{ kind: "text", text: say("docStagesPending") }] });
+  // E4: the answers of a decomposition run take the place of the stages
+  for (const e of input.split ?? []) sections.push(splitSection(locale, e));
+  if (!model.stages?.length && !input.split?.length) sections.push({ heading: say("orchSum_stages"), lines: [{ kind: "text", text: say("docStagesPending") }] });
   if (model.stages?.length) sections.push({ heading: say("orchSum_stages"), lines: [{ kind: "text", text: say("docPlanByLead") }] });
   for (const st of model.stages ?? []) {
     const lines: DocLine[] = [{ kind: "text", text: loaded(locale, stageTask(plans, st.n)) }];

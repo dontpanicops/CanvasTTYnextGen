@@ -142,6 +142,7 @@ export interface AutopilotState {
   // C4 (stage-c4-limits.md §2): the provider's limit it waits for (the earliest known reset), and its last continuation
   limit?: AutopilotLimit | null;
   resumed?: { runId: string; key: string; provider: string; at: string } | null;
+  splitting?: string | null; // E4 (stage-e-decomposition.md §10): the key of the parent whose own split goes on
 }
 
 // C4 (stage-c4-limits.md §2): a run of the place paused at a provider's limit — a task's (facts) or a resolution run's
