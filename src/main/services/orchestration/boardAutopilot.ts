@@ -34,6 +34,8 @@ export interface BoardAutopilotDeps {
   resume?(runId: string): Promise<R<void>>;
   limitTurns?(runId: string): Promise<Set<string>>;
   resolutionLimits?(workspaceId: string, project: string): Promise<{ runId: string; key: string; provider: string; resetsAt: number | null }[]>;
+  // E3 (stage-e-decomposition.md §7): the decomposition run of a parent (main's startDecomposition)
+  decompose?(taskId: string, language: "ru" | "en"): Promise<R<{ runId: string }>>;
   newId(): string;
   now(): number;
 }
@@ -48,6 +50,7 @@ interface Live {
   grants: OrchestrationProjectProfile["grants"];
   started: string[];
   agents: string[]; // C3: the resolution runs it started — runs and minutes of its budget
+  splits: string[]; // E3: the decomposition runs it started — runs and minutes of its budget
   refused: Set<string>; // C3: merges the application would not hand to an agent: the person's
   pending: string | null; // a start asked and not answered yet (a refusal clears it; an error turns the autopilot off)
   waits: string | null;
@@ -87,25 +90,27 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
   async function used(l: Live, head?: BoardHead | null): Promise<{ runs: number; ms: number }> {
     let ms = 0;
     // C4 (§2.4): a pause at a provider's limit is a wait, not work
-    for (const id of [...l.started, ...l.agents]) {
+    for (const id of [...l.started, ...l.agents, ...l.splits]) {
       ms += activeMs(await deps.journal(id).catch(() => []), deps.now(), undefined, await deps.limitTurns?.(id).catch(() => new Set<string>()) ?? new Set());
     }
     const merges = (head === undefined ? await deps.head(l.workspaceId, l.project).catch(() => null) : head)?.merges ?? [];
     for (const m of merges) if (m.createdAt >= l.since) l.merges.add(m.runId);
     for (const id of l.merges) ms += activeMs(await deps.journal(id).catch(() => []), deps.now(), () => true);
-    return { runs: l.started.length + l.agents.length, ms };
+    return { runs: l.started.length + l.agents.length + l.splits.length, ms };
   }
 
   // C4 (§2.2, §2.4): the runs of the place paused at a provider's limit. Its own (started, agents) it may continue; a
   // reset not later than the one it continued at last reads as unknown; a run that completed a turn since starts afresh
   async function limitedRuns(l: Live, board: Board, facts: RunTaskFacts[], at: { workspaceId: string; project: string }): Promise<LimitedRun[]> {
     const place = new Map(board.tasks.filter((t) => t.workspaceId === at.workspaceId && t.project === at.project).map((t) => [t.id, t.key]));
-    const found = facts.filter((f) => f.status === "paused" && f.providerLimit && f.taskId && place.has(f.taskId))
-      .map((f) => ({ runId: f.runId, key: place.get(f.taskId!)!, provider: f.providerLimit!.provider, resetsAt: f.providerLimit!.resetsAt }));
+    // E3 (§7): its own decomposition runs too (the key is the parent's); a person's split is not the autopilot's to continue
+    const parent = (f: RunTaskFacts) => f.taskId ?? (l.splits.includes(f.runId) ? f.decompositionOf ?? null : null);
+    const found = facts.filter((f) => f.status === "paused" && f.providerLimit && parent(f) && place.has(parent(f)!))
+      .map((f) => ({ runId: f.runId, key: place.get(parent(f)!)!, provider: f.providerLimit!.provider, resetsAt: f.providerLimit!.resetsAt }));
     found.push(...await deps.resolutionLimits?.(at.workspaceId, at.project).catch(() => []) ?? []);
     const out: LimitedRun[] = [];
     for (const f of found) {
-      const own = l.started.includes(f.runId) || l.agents.includes(f.runId);
+      const own = l.started.includes(f.runId) || l.agents.includes(f.runId) || l.splits.includes(f.runId);
       let r = l.resumes.get(f.runId);
       if (r && completedTurns(await deps.journal(f.runId).catch(() => [])) > r.turns) { l.resumes.delete(f.runId); r = undefined; }
       const stale = r && f.resetsAt !== null && r.reset !== null && f.resetsAt <= r.reset;
@@ -134,8 +139,8 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
     const limited = await limitedRuns(l, board, facts, at);
     const now = deps.now();
     const next = isCopy(profile.workMode)
-      ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head, l.refused, limited, now)
-      : autopilotStep(board, facts, { ...at, workMode: profile.workMode }, l.started.at(-1) ?? null, await used(l, null), await budgetOf(linkId), limited, now);
+      ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head, l.refused, limited, now, l.splits)
+      : autopilotStep(board, facts, { ...at, workMode: profile.workMode }, l.started.at(-1) ?? null, await used(l, null), await budgetOf(linkId), limited, now, l.splits);
     l.waits = next.kind === "wait" ? next.why : null;
     l.limit = next.kind === "wait" ? next.limit ?? null : null;
     if (next.kind === "wait") return;
@@ -180,6 +185,20 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       if (!["created", "renamed", "already"].includes(r.value.result)) return off(linkId, "take_failed", r.value.result, next.key);
       return;
     }
+    if (next.kind === "decompose") {
+      // E3 (§7): the settings as when it was turned on, as before a start; the split stands on no link: no readiness
+      if (fingerprint(profile) !== l.print) {
+        const added = profile.grants.filter((g) => !l.grants.some((o) => o.id === g.id));
+        return added.length ? off(linkId, "grant_added", added.map((g) => `${g.provider}: ${g.summary}`).join("; "), next.task.key)
+          : off(linkId, "settings_changed", null, next.task.key);
+      }
+      if (!deps.decompose) return off(linkId, "decomposition_failed", "unavailable", next.task.key);
+      const r = await deps.decompose(next.task.id, l.language);
+      if (r.ok) { l.splits.push(r.value.runId); return; }
+      // someone split or started it first, or its dependencies moved: the next step decides from the board as it is
+      if (["decomposition_active", "task_active_run", "deps_not_ready"].includes(r.code)) return;
+      return off(linkId, "decomposition_failed", r.code, next.task.key);
+    }
     // before a start: the settings as when it was turned on, then the same readiness as the dialog's
     if (fingerprint(profile) !== l.print) {
       const added = profile.grants.filter((g) => !l.grants.some((o) => o.id === g.id));
@@ -220,7 +239,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       const at = await deps.link(linkId);
       if (!at) throw Object.assign(new Error("no such link"), { code: "link_not_found" });
       const profile = await deps.profile(at.project);
-      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], refused: new Set(), pending: null, waits: null, busy: false, resumes: new Map(), limit: null, resumed: null });
+      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], splits: [], refused: new Set(), pending: null, waits: null, busy: false, resumes: new Map(), limit: null, resumed: null });
       stops.delete(linkId);
       // the first step on the next beat; the timer alone never keeps the process up
       timer ??= setInterval(() => { for (const id of live.keys()) void tick(id); }, tickMs);

@@ -342,7 +342,7 @@ test("the parent starts only when every live subtask is in the board's result; �
   assert.notEqual(step(tasks, [r1, r2], skipped).task?.key, "T-1");
 });
 
-test("until the autopilot splits (E3): a marked parent that is not split is not taken, unless the lead said «whole»", () => {
+test("a marked parent that is not split is not taken as a task (the autopilot splits it first, E3), unless the lead said «whole»", () => {
   const P = task("T-1", { decompose: true });
   const Q = task("T-2");
   const statuses = (facts) => boardStatuses({ tasks: [P, Q] }, facts);
@@ -351,7 +351,8 @@ test("until the autopilot splits (E3): a marked parent that is not split is not 
   assert.equal(nextTask({ tasks: [P] }, statuses([]), at), null);
   const whole = [splitRun(P, { split: "whole" })];
   assert.equal(nextTask({ tasks: [P, Q] }, statuses(whole), at).key, "T-1");
-  assert.equal(step([P, Q], [], head([])).task.key, "T-2");
-  assert.equal(step([P], [], head([])).kind, "off");
+  assert.deepEqual([step([P, Q], [], head([])).kind, step([P, Q], [], head([])).task.key], ["decompose", "T-1"], "E3: split first, not started whole");
+  assert.equal(step([P, Q], [splitRun(P, { status: "failed" })], head([])).task.key, "T-2", "the person's split that failed: the parent is skipped");
+  assert.equal(step([P], [splitRun(P, { status: "failed" })], head([])).kind, "off");
   assert.equal(step([P, Q], whole, head([])).task.key, "T-1");
 });
