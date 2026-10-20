@@ -1734,6 +1734,8 @@ export function createRunManager(deps: RunManagerDeps) {
       }
       return out;
     },
+    // E3 (stage-e-decomposition.md §7): the split of a parent by the autopilot
+    decompose: (taskId, language) => result(() => startDecomposition(taskId, language)),
     newId: () => randomUUID(),
     now: () => Date.now()
   }, async (linkId) => (await board.read()).board.autopilot?.[linkId] ?? AUTOPILOT_BUDGET);

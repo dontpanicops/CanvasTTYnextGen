@@ -130,7 +130,7 @@ export const conflictsOf = (b: AutopilotBudget): "agent" | "person" => (b.confli
 export const parallelOf = (b: AutopilotBudget): number => (Number.isInteger(b.parallel) && b.parallel! >= 1 && b.parallel! <= 4 ? b.parallel! : AUTOPILOT_PARALLEL);
 export type AutopilotStopCode = "all_done" | "others_wait" | "budget_runs" | "budget_minutes" | "run_stopped" | "run_failed" | "limit_reached"
   | "run_paused" | "run_unreadable" | "settings_changed" | "grant_added" | "not_ready" | "take_failed" | "start_failed" | "worktree_base" | "link_gone" | "task_gone"
-  | "head_moved" | "merge_failed" | "resume_failed";
+  | "head_moved" | "merge_failed" | "resume_failed" | "decomposition_failed";
 export interface AutopilotWaiting { key: string; reason: TaskReason | null; waitsFor: string[] }
 export interface AutopilotStop { code: AutopilotStopCode; detail: string | null; key: string | null; at: string; waiting?: AutopilotWaiting[] }
 export interface AutopilotState {
@@ -449,18 +449,22 @@ export function baseOf(task: Pick<BoardTask, "id" | "dependsOn">, board: Pick<Bo
   return null;
 }
 
-// E2 (stage-e-decomposition.md §7, until E3's decompose step): a parent marked «Split» that is not split is not run whole
-// by the autopilot — unless the lead answered «whole»
+// E3 (stage-e-decomposition.md §7): a parent marked «Split» that is not split is not run whole by the autopilot —
+// unless the lead answered «whole». (A parent in decomposition_failed / decomposition_paused / subtasks_gone is out of
+// the queue-with-no-reason already, by parentStatus.)
 const notYetSplit = (t: BoardTask, s: TaskStatus): boolean => !!t.decompose && !t.decomposedBy && s.split?.detail !== "whole";
 
 // B4 (§5.1): the board's autopilot takes, of the tasks of the link's workspace and the lead's folder, not archived, in
 // the queue without a reason and never tried (a retry after stopped or failed is the person's), the first by order.
+// E3 (§2.2): a subtask whose parent is in the archive is not taken (a missing parent: taken)
+const parentArchived = (t: Pick<BoardTask, "parentId">, tasks: readonly BoardTask[]): boolean => !!t.parentId && !!tasks.find((x) => x.id === t.parentId)?.archivedAt;
+
 export function nextTask(board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string }): BoardTask | null {
   return board.tasks.filter((t) => {
     const s = statuses.get(t.id);
     // a dependency «Done» on a shaky base (its own dependency changed, or it was started anyway) is the person's call
     return t.workspaceId === at.workspaceId && t.project === at.project && !t.archivedAt && s?.column === "queue" && s.reason === null && s.attempts === 0
-      && !heldDeps(t, board.tasks).some((d) => statuses.get(d)?.depsNote) && !notYetSplit(t, s);
+      && !heldDeps(t, board.tasks).some((d) => statuses.get(d)?.depsNote) && !notYetSplit(t, s) && !parentArchived(t, board.tasks);
   }).sort((a, b) => a.order - b.order)[0] ?? null;
 }
 
@@ -575,21 +579,70 @@ export function activeMs(records: readonly { ts: string; type: string; data: Rec
   return total + (from !== null ? Math.max(0, now - from) : 0);
 }
 
+// E3 (stage-e-decomposition.md §7): the autopilot's own decomposition runs (splits: their ids) as the steps read them —
+// halt: stops it; person: waits for the person; moving: goes on by itself (or main is making the subtasks). A run paused at
+// a provider's limit is limitStep's. Only these runs stop the autopilot: a person's split never does.
+function ownSplits(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], splits: readonly string[], limited: readonly LimitedRun[]):
+  { halt: { code: AutopilotStopCode; detail: string | null; key: string | null } | null; person: string | null; moving: boolean } {
+  let halt: { code: AutopilotStopCode; detail: string | null; key: string | null } | null = null;
+  let person: string | null = null;
+  let moving = false;
+  for (const id of splits) {
+    const f = facts.find((x) => x.runId === id);
+    if (!f) { moving = true; continue; } // its journal is not there yet
+    const t = board.tasks.find((x) => x.id === f.decompositionOf);
+    if (!t) { halt ??= { code: "task_gone", detail: null, key: null }; continue; }
+    const key = t.key;
+    const failed = (detail: string | null) => { halt ??= { code: "decomposition_failed", detail, key }; };
+    if (f.newer || f.status === "unreadable") halt ??= { code: "run_unreadable", detail: null, key };
+    else if (f.permission) person ??= "permission";
+    else if (f.status === "failed") failed("failed");
+    else if (f.status === "stopped") failed("stopped");
+    else if (f.status === "paused") {
+      if (limited.some((x) => x.runId === id)) continue;
+      if (WAIT_PAUSES.has(f.reason ?? "")) person ??= "person";
+      else halt ??= f.reason === "limit_reached" ? { code: "limit_reached", detail: f.limit, key } : { code: "run_paused", detail: f.reason, key };
+    } else if (f.status === "completed") {
+      if (f.split === "proposed") { if (f.splitFailed) failed(f.splitFailed); else if (t.decomposedBy !== id) moving = true; }
+      else if (f.split !== "whole") failed(f.split === "rejected" ? "rejected" : "failed");
+    } else if (f.halted) halt ??= { code: "run_paused", detail: f.reason, key };
+    else moving = true;
+  }
+  return { halt, person, moving };
+}
+
+// E3 (§7): the first parent of the place to split: marked, not split, not a subtask, never tried, its dependencies ready,
+// and no decomposition of it at all (a retry is the person's)
+function decomposeCandidate(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string }): BoardTask | null {
+  return board.tasks.filter((t) => {
+    const s = statuses.get(t.id);
+    return t.workspaceId === at.workspaceId && t.project === at.project && t.decompose && !t.decomposedBy && !t.parentId && !t.archivedAt
+      && s?.column === "queue" && s.reason === null && s.attempts === 0 && s.depsWait === null && !heldDeps(t, board.tasks).some((d) => statuses.get(d)?.depsNote)
+      && !facts.some((f) => f.decompositionOf === t.id && f.workspaceId === t.workspaceId);
+  }).sort((a, b) => a.order - b.order)[0] ?? null;
+}
+
 export type AutopilotStep =
   | { kind: "wait"; why: string; limit?: AutopilotLimit }
   | { kind: "resume"; runId: string; key: string; provider: string } // C4: continue its own run after the limit's reset
   | { kind: "take"; runId: string; key: string }
   | { kind: "start"; task: BoardTask; base: OrchestrationBaseRef | null }
+  | { kind: "decompose"; task: BoardTask } // E3: split a parent marked «Split» (main starts the decomposition run)
   | { kind: "off"; code: AutopilotStopCode; detail: string | null; key: string | null; waiting?: AutopilotWaiting[] };
 
 // B4 (§5.2): what the board's autopilot of a link does next, from the board and the facts of the runs alone (the
 // settings, the readiness and the start itself are main's). last: the run it started last (null: none yet).
 export function autopilotStep(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], at: { workspaceId: string; project: string; workMode: OrchestrationWorkMode },
-  last: string | null, used: { runs: number; ms: number }, budget: AutopilotBudget, limited: readonly LimitedRun[] = [], now = Date.now()): AutopilotStep {
+  last: string | null, used: { runs: number; ms: number }, budget: AutopilotBudget, limited: readonly LimitedRun[] = [], now = Date.now(),
+  splits: readonly string[] = []): AutopilotStep {
   // C4 (§2.1): a run of the place at a provider's limit comes before anything else — no new task meanwhile
   const limits = limitStep(limited, now);
   if (limits) return limits;
   const statuses = boardStatuses(board, facts);
+  // E3 (§7): its own decomposition run first: one at a time, nothing else runs while it goes on
+  const sp = ownSplits(board, facts, splits, limited);
+  if (sp.halt) return { kind: "off", ...sp.halt };
+  if (sp.person || sp.moving) return { kind: "wait", why: sp.person ?? "run" };
   const run = last ? facts.find((f) => f.runId === last) : undefined;
   const task = run?.taskId ? board.tasks.find((t) => t.id === run.taskId) : undefined;
   if (last && !run) return { kind: "wait", why: "run" }; // its journal is not there yet
@@ -611,10 +664,18 @@ export function autopilotStep(board: Pick<Board, "tasks">, facts: readonly RunTa
     if (autoTakeOnDone(s, run) === "branch") return { kind: "take", runId: run.runId, key };
   }
   const next = nextTask(board, statuses, at);
-  // another run of this place goes on (the person's, another link's): what it leaves may free the next task
+  // another run of this place goes on (the person's, another link's; E3: a split too): what it leaves may free the next task
   // (a run paused for another reason waits for nobody: the others wait, said as such)
   const busyHere = facts.some((f) => (ACTIVE.has(f.status) || f.permission || (f.status === "paused" && WAIT_PAUSES.has(f.reason ?? "")))
-    && board.tasks.some((t) => t.id === f.taskId && t.workspaceId === at.workspaceId && t.project === at.project));
+    && board.tasks.some((t) => t.id === (f.taskId ?? f.decompositionOf) && t.workspaceId === at.workspaceId && t.project === at.project));
+  // E3 (§7): before a start of an ordinary task, a parent ready to split
+  const split = decomposeCandidate(board, facts, statuses, at);
+  if (split) {
+    if (busyHere) return { kind: "wait", why: "run" };
+    if (used.runs >= budget.runs) return { kind: "off", code: "budget_runs", detail: String(budget.runs), key: null };
+    if (used.ms >= budget.minutes * 60_000) return { kind: "off", code: "budget_minutes", detail: String(budget.minutes), key: null };
+    return { kind: "decompose", task: split };
+  }
   if (!next && busyHere) return { kind: "wait", why: "run" };
   if (!next) {
     const idle = idleOf(board, statuses, at);
@@ -651,7 +712,7 @@ export const isCopy = (mode: OrchestrationWorkMode | null | undefined): boolean 
 // refused (C3): merges the application would not hand to an agent (a lock file, not from the head, …): the person's
 export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], at: { workspaceId: string; project: string },
   started: readonly string[], used: { runs: number; ms: number }, budget: AutopilotBudget, head: BoardHead | null, refused: ReadonlySet<string> = new Set(),
-  limited: readonly LimitedRun[] = [], now = Date.now()): AutopilotParallelStep {
+  limited: readonly LimitedRun[] = [], now = Date.now(), splits: readonly string[] = []): AutopilotParallelStep {
   const statuses = boardStatuses(board, facts, head ? [head] : []);
   const place = board.tasks.filter((t) => t.workspaceId === at.workspaceId && t.project === at.project);
   const mergeOf = (taskId: string) => mergeOfTask(head, taskId, statuses.get(taskId)?.current ?? null);
@@ -680,6 +741,11 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
     else if (!s.done) halt ??= { code: "run_paused", detail: run.reason, key };
     else if (autoTakeOnDone(s, run) === "branch") return { kind: "take", runId: run.runId, key };
   }
+  // E3 (stage-e-decomposition.md §7): its own decomposition runs, as the runs it started
+  if (splits.some((id) => !facts.some((f) => f.runId === id))) return { kind: "wait", why: "run" }; // its journal is not there yet: no second split of the parent
+  const sp = ownSplits(board, facts, splits, limited);
+  halt ??= sp.halt;
+  person ??= sp.person;
   // the merges: one at a time; a paused one waits for the person, the head moved by someone else ends it
   const merges = head?.merges ?? [];
   const merging = merges.some((m) => MERGE_ACTIVE.has(m.status));
@@ -714,7 +780,8 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   if (limits) return limits;
   // the slots: every run of the place that is not over (a pause holds its copy and may go on)
   const SLOT = new Set(["created", "preparing", "running", "pausing", "stopping", "paused"]);
-  const busy = facts.filter((f) => place.some((t) => t.id === f.taskId) && (SLOT.has(f.status) || f.permission
+  // E3 (§7): every split of the place holds a slot too, the person's as well
+  const busy = facts.filter((f) => place.some((t) => t.id === (f.taskId ?? f.decompositionOf)) && (SLOT.has(f.status) || f.permission
     || (f.status === "completed" && statuses.get(f.taskId!)?.reason === "no_checks" && statuses.get(f.taskId!)?.current === f.runId))).length
     // C3: a merge waiting for its resolution run holds a slot (the run is not on the board's facts)
     + merges.filter((m) => m.status === "running" && m.agent?.pending).length;
@@ -726,17 +793,24 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   }
   // what goes on by itself: a run at work or waiting for the person's answer — a run paused for another reason (a bad
   // report, an external failure) holds its place but moves only by the person's «Продолжить»: no wait on it (§8)
-  const moving = facts.some((f) => place.some((t) => t.id === f.taskId) && (ACTIVE.has(f.status) || f.permission || (f.status === "paused" && WAIT_PAUSES.has(f.reason ?? ""))));
+  const moving = sp.moving || facts.some((f) => place.some((t) => t.id === (f.taskId ?? f.decompositionOf)) && (ACTIVE.has(f.status) || f.permission || (f.status === "paused" && WAIT_PAUSES.has(f.reason ?? ""))));
   const goingOn = moving || merging || (pending.length > 0 && !moved);
   if (halt) return goingOn || person ? { kind: "wait", why: "run" } : { kind: "off", ...halt };
   // a task without a reason, never tried; a dependency counts once it is in the head (owner's decision 9), or its result
   // is in the working folder (it worked there, or was applied) — the head starts from that folder. ponytail: a folder
   // result that came after the head started is not in it; «Начать новый итог доски» takes it in
+  // E3 (§7): a parent ready to split goes before the ordinary start: a slot and the budget as for a start
+  const split = decomposeCandidate(board, facts, statuses, at);
+  if (split && busy < parallelOf(budget) && !retrying) {
+    if (used.runs >= budget.runs) return goingOn ? { kind: "wait", why: "run" } : { kind: "off", code: "budget_runs", detail: String(budget.runs), key: null };
+    if (used.ms >= budget.minutes * 60_000) return goingOn ? { kind: "wait", why: "run" } : { kind: "off", code: "budget_minutes", detail: String(budget.minutes), key: null };
+    return { kind: "decompose", task: split };
+  }
   const resultIn = (d: string) => resultOf(facts.find((f) => f.runId === statuses.get(d)?.current)) === "folder";
   const next = place.filter((t) => {
     const s = statuses.get(t.id);
     const held = heldDeps(t, board.tasks); // E2 (§2.2): an archived subtask does not hold its parent
-    if (!s || t.archivedAt || s.column !== "queue" || s.attempts !== 0 || held.some((d) => statuses.get(d)?.depsNote) || notYetSplit(t, s)) return false;
+    if (!s || t.archivedAt || s.column !== "queue" || s.attempts !== 0 || held.some((d) => statuses.get(d)?.depsNote) || notYetSplit(t, s) || parentArchived(t, board.tasks)) return false;
     if (!held.length) return s.reason === null;
     return held.every((d) => !board.tasks.some((x) => x.id === d) || (statuses.get(d)?.done && (inHead(d) || resultIn(d))));
   }).sort((a, b) => a.order - b.order)[0] ?? null;
@@ -747,7 +821,7 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
     if (!head) return { kind: "head" };
     return { kind: "start", task: next, base: { branch: head.ref, commit: head.commit, key: "T-0" } };
   }
-  if (goingOn || next || person) return { kind: "wait", why: person ?? "run" };
+  if (goingOn || next || split || person) return { kind: "wait", why: person ?? "run" };
   const idle = idleOf(board, statuses, at);
   if (idle.allDone) return { kind: "off", code: "all_done", detail: null, key: null };
   const detail = idle.waiting.map((w) => (w.waitsFor.length ? `${w.key} (${w.reason}: ${w.waitsFor.join(", ")})` : `${w.key} (${w.reason ?? "-"})`)).join("; ");
