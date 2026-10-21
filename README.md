@@ -95,10 +95,6 @@ npm run typecheck
 npm run build
 ```
 
-## Credits
-
-Raoden Loom is a fork of [CanvasTTY](https://github.com/howdeploy/CanvasTTY) by [howdeploy](https://github.com/howdeploy).
-
 ## License
 
 Raoden Loom is released under the [MIT License](LICENSE).

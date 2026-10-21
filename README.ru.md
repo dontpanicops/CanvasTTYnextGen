@@ -90,10 +90,6 @@ npm run typecheck
 npm run build
 ```
 
-## Благодарности
-
-Raoden Loom — форк [CanvasTTY](https://github.com/howdeploy/CanvasTTY) от [howdeploy](https://github.com/howdeploy).
-
 ## Лицензия
 
 Raoden Loom распространяется по [лицензии MIT](LICENSE).
