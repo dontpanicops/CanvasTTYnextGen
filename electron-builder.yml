@@ -106,4 +106,4 @@ mac:
 publish:
   provider: github
   owner: dontpanicops
-  repo: CanvasTTYnextGen
+  repo: raoden-loom
