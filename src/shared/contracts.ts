@@ -1202,6 +1202,7 @@ export const IPC = {
   orchestrationBoardInboxImport: "orchestration:board-inbox-import",
   orchestrationBoardInboxReject: "orchestration:board-inbox-reject",
   orchestrationBoardEvent: "orchestration:board-event",
+  orchestrationBoardExternalMark: "orchestration:board-external-mark", // F2
   orchestrationReadiness: "orchestration:readiness",
   orchestrationProfileGet: "orchestration:profile-get",
   orchestrationProfileSave: "orchestration:profile-save",

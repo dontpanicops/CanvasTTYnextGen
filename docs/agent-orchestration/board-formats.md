@@ -82,6 +82,7 @@ The full example uses every field. The chain: `T1` is an ordinary task, `T1-MR` 
 
 - The file is checked as a whole, then all valid rows are written in one change, then a report is made. A refused row refuses the rows that depend on it (`dependency_refused`).
 - A task with the same `ref` is updated: `title`, `text`, `criteria`, `dependsOn` and the later fields are replaced. An optional field that the file does not have (`issue`, `external`, `models`, `scope`, `commitTitle`) is removed from the existing task. A changed `project` is `project_changed`. A task that already has runs is not changed (`task_started`; an identical row is `unchanged`). An archived task with the same `ref` is `task_archived`. A task that was split is `task_split`.
+- An external task (`external: true`) without `criteria` gets one requirement written by Loom, `Отметка человека «Выполнено»` (builds before F2 need at least one). When the file is compared with the board, that line counts as "no criteria": the same row again is `unchanged`. A file without `external` takes the mark «Done» of that task off too.
 - `ifAbsent: true`: no task with the `ref` — it is created; an existing one (not archived) is `unchanged` without comparing fields; an archived one is `task_archived`.
 - New tasks are added in file order after the existing ones.
 

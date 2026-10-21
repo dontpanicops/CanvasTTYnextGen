@@ -117,8 +117,9 @@ test("ifAbsent with an existing ref and another text → unchanged, the task as 
   assert.deepEqual(codes(await imp(st, [row("T3", { ifAbsent: false })])), [["T3", "invalid_task"]]);
 });
 
-for (const [field, value] of [["external", true], ["models", { executor: "opus" }], ["issue", "ISSUE-1"], ["commitTitle", "feat: первая задача"], ["scope", ["docs/**"]]]) {
-  test(`the F2–F4 field ${field} in F1 → field_not_supported for its row only`, async () => {
+// F2 takes external and models (orchestration-board-external.test.mjs); the fields of F3–F4 are refused until their step
+for (const [field, value] of [["issue", "ISSUE-1"], ["commitTitle", "feat: первая задача"], ["scope", ["docs/**"]]]) {
+  test(`the F3–F4 field ${field} before its step → field_not_supported for its row only`, async () => {
     const st = store();
     const rows = await imp(st, [row("T1", { [field]: value }), row("T2")]);
     assert.deepEqual(codes(rows), [["T1", "field_not_supported"]]);

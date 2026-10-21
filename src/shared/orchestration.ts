@@ -627,6 +627,9 @@ export interface OrchestrationApi {
   // dependents: the tasks the person was shown as losing this dependency (task_has_dependents otherwise)
   boardRemove(id: string, dependents?: string[]): Promise<OrchestrationResult<null>>;
   boardAccept(id: string): Promise<OrchestrationResult<BoardTask>>;
+  // F2 (stage-f-external-projects.md §5.6): «Выполнено» (done, an optional note up to 300) and «Снять отметку» of an
+  // external task — the person's decision; macOS arm64 only (unsupported_platform)
+  boardExternalMark(taskId: string, done: boolean, note?: string): Promise<OrchestrationResult<BoardTask>>;
   boardPlace(workspaceId: string, bounds: BoardPlace | null): Promise<OrchestrationResult<null>>; // B2: the card's place, null: hidden
   // B4: the board's autopilot of a link on or off (never stored); its budget in board.json (null: the default)
   boardAutopilot(linkId: string, on: boolean, language: "ru" | "en"): Promise<OrchestrationResult<AutopilotState | null>>;

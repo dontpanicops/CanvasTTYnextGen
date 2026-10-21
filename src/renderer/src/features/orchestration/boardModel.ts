@@ -13,7 +13,7 @@ export const tr = (locale: LocaleId, key: string, vars: Record<string, string | 
 type RunInput = Pick<Parameters<typeof runStatus>[1], "view" | "entries" | "open">;
 // providerLimit (C4): the pause is a provider's usage limit — named, with its reset when known
 export function taskLine(locale: LocaleId, status: TaskStatus, run: RunInput | null, limit: string | null, providerLimit: RunTaskFacts["providerLimit"] = null): string {
-  if (status.done) return t(locale, status.done === "accepted" ? "boardDone_accepted" : "boardDone_confirmed");
+  if (status.done) return t(locale, status.done === "accepted" ? "boardDone_accepted" : status.done === "external" ? "boardDone_external" : "boardDone_confirmed");
   const keys = status.waitsFor.join(", ");
   if (status.reason === "waits_task" && status.cycle) return tr(locale, "boardReason_cycle", { keys });
   if (providerLimit && status.column !== "done") {

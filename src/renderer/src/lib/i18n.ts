@@ -2165,6 +2165,7 @@ const ru = {
   boardStartAnywayWhy_waits_task: "Ещё не готово: {keys}. Эта задача может опираться на их результат. Запустить всё равно?",
   boardStartAnywayWhy_waits_result: "Результат {keys} не забран: эта задача его не увидит. Запустить всё равно?",
   boardStartAnywayWhy_waits_merge: "Результаты {keys} нужно объединить (это этап C). Запустить всё равно — от рабочей папки?",
+  boardStartAnywayWhy_waits_external: "Ещё не отмечены внешние задачи: {keys}. Запустить всё равно?",
   boardReason_waits_merge: "Нужно объединить результаты {keys} (этап C)",
   // E2 (stage-e-decomposition.md §10): the parent task's reasons, why a split failed, the refusals
   boardReason_decomposing: "разбивается на подзадачи",
@@ -2264,7 +2265,21 @@ const ru = {
   boardImportCode_task_started: "У задачи {ref} есть запуски: правка отклонена",
   boardImportCode_task_archived: "Задача {ref} в архиве",
   boardImportCode_task_split: "Задача {ref} разбита: правка отклонена",
-  boardImportCode_too_many_tasks: "На доске не хватит места для этих задач"
+  boardImportCode_too_many_tasks: "На доске не хватит места для этих задач",
+  // F2 (stage-f-external-projects.md §10): external tasks
+  boardExternal: "внешняя",
+  boardExternalDone: "Выполнено",
+  boardExternalNote: "Заметка (до 300 знаков)",
+  boardExternalUndo: "Снять отметку",
+  boardExternalWaits: "Ждёт отметки человека «Выполнено»",
+  boardDone_external: "Готово (отмечено вами: «Выполнено»)",
+  boardReason_waits_external: "Ждёт отметки внешней задачи {keys}",
+  boardReason_external_has_runs: "У задачи есть запуски, внешней она не считается",
+  boardApWaits_external: "ждёт отметки внешней задачи {key}",
+  orchError_external_task: "Внешнюю задачу не запускают и не разбивают: её отмечает человек («Выполнено»)",
+  orchError_deps_not_done: "Собственные зависимости задачи ещё не «Готово»: отметка недоступна",
+  orchError_dependents_started: "Зависимые задачи уже начаты: отметку снять нельзя",
+  orchError_external_has_runs: "У задачи есть запуски: она идёт по ним, отметка не нужна"
 } as const;
 
 const en: Record<keyof typeof ru, string> = {
@@ -4429,6 +4444,7 @@ const en: Record<keyof typeof ru, string> = {
   boardStartAnywayWhy_waits_task: "Not done yet: {keys}. This task may rely on their result. Start anyway?",
   boardStartAnywayWhy_waits_result: "The result of {keys} is not taken: this task will not see it. Start anyway?",
   boardStartAnywayWhy_waits_merge: "The results of {keys} need merging (stage C). Start anyway — from the working folder?",
+  boardStartAnywayWhy_waits_external: "External tasks not marked yet: {keys}. Start anyway?",
   boardReason_waits_merge: "The results of {keys} need merging (stage C)",
   // E2 (stage-e-decomposition.md §10): the parent task's reasons, why a split failed, the refusals
   boardReason_decomposing: "being split into subtasks",
@@ -4528,7 +4544,20 @@ const en: Record<keyof typeof ru, string> = {
   boardImportCode_task_started: "The task {ref} has runs: the change was refused",
   boardImportCode_task_archived: "The task {ref} is archived",
   boardImportCode_task_split: "The task {ref} is split: the change was refused",
-  boardImportCode_too_many_tasks: "There is not enough room on the board for these tasks"
+  boardImportCode_too_many_tasks: "There is not enough room on the board for these tasks",
+  boardExternal: "external",
+  boardExternalDone: "Done",
+  boardExternalNote: "Note (up to 300 characters)",
+  boardExternalUndo: "Remove the mark",
+  boardExternalWaits: "Waits for a person's mark «Done»",
+  boardDone_external: "Done (marked by you: «Done»)",
+  boardReason_waits_external: "Waits for the external task {keys} to be marked",
+  boardReason_external_has_runs: "The task has runs, so it is not treated as external",
+  boardApWaits_external: "waiting for the external task {key} to be marked",
+  orchError_external_task: "An external task is neither started nor split: a person marks it («Done»)",
+  orchError_deps_not_done: "The task's own dependencies are not done yet: the mark is not available",
+  orchError_dependents_started: "The dependent tasks have started: the mark cannot be removed",
+  orchError_external_has_runs: "The task has runs: it goes by them, no mark is needed"
 };
 
 export type TranslationKey = keyof typeof ru;

@@ -53,7 +53,9 @@ interface Live {
   splits: string[]; // E3: the decomposition runs it started — runs and minutes of its budget
   refused: Set<string>; // C3: merges the application would not hand to an agent: the person's
   pending: string | null; // a start asked and not answered yet (a refusal clears it; an error turns the autopilot off)
+  notReady: string | null; // F2: the task whose start was refused task_not_ready once — a second refusal in a row turns it off
   waits: string | null;
+  waitsKey: string | null; // F2: the external task it waits to be marked
   // C4: its continuations of a run in a row (reset once a turn of it completes), the reset each was for
   resumes: Map<string, { n: number; reset: number | null; turns: number }>;
   limit: AutopilotLimit | null;
@@ -157,6 +159,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head, l.refused, limited, now, l.splits)
       : autopilotStep(board, facts, { ...at, workMode: profile.workMode }, l.started.at(-1) ?? null, await used(l, null), await budgetOf(linkId), limited, now, l.splits);
     l.waits = next.kind === "wait" ? next.why : null;
+    l.waitsKey = next.kind === "wait" ? next.key ?? null : null;
     l.limit = next.kind === "wait" ? next.limit ?? null : null;
     if (next.kind === "wait") return;
     if (next.kind === "resume") {
@@ -237,12 +240,18 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
     const r = await deps.start({ linkId, requestId: l.pending, goal });
     if (!r.ok) {
       // C1: the head moved by a merge between this step and the start, or another link's autopilot took the task: the
-      // next step decides again from the board as it is
+      // next step decides again from the board as it is. F2: a mark taken off while the start was checked (task_not_ready):
+      // decided again once per task — refused again, the step and the start's check disagree, and it stops
+      if (r.code === "task_not_ready") {
+        if (l.notReady === next.task.id) return off(linkId, "start_failed", r.code, next.task.key);
+        l.notReady = next.task.id; l.pending = null; l.waits = "run"; return;
+      }
       const raced = next.base?.key === "T-0" && (r.code === "invalid_base" || r.code === "task_active_run");
       if (LATER.has(r.code) || raced) { l.pending = null; l.waits = "run"; return; }
       return off(linkId, "start_failed", r.code, next.task.key);
     }
     l.pending = null;
+    l.notReady = null;
     l.started.push(r.value.runId);
   }
 
@@ -254,7 +263,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       const at = await deps.link(linkId);
       if (!at) throw Object.assign(new Error("no such link"), { code: "link_not_found" });
       const profile = await deps.profile(at.project);
-      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], splits: [], refused: new Set(), pending: null, waits: null, busy: false, resumes: new Map(), limit: null, resumed: null });
+      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], splits: [], refused: new Set(), pending: null, notReady: null, waits: null, waitsKey: null, busy: false, resumes: new Map(), limit: null, resumed: null });
       stops.delete(linkId);
       // the first step on the next beat; the timer alone never keeps the process up
       timer ??= setInterval(() => { for (const id of live.keys()) void tick(id); }, tickMs);
@@ -265,7 +274,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       for (const id of new Set([...live.keys(), ...stops.keys()])) {
         const l = live.get(id);
         const u = l ? await used(l) : { runs: 0, ms: 0 };
-        out[id] = { on: !!l, budget: await budgetOf(id), used: { runs: u.runs, minutes: Math.floor(u.ms / 60_000) }, waits: l?.waits ?? null, stop: stops.get(id) ?? null,
+        out[id] = { on: !!l, budget: await budgetOf(id), used: { runs: u.runs, minutes: Math.floor(u.ms / 60_000) }, waits: l?.waits ?? null, waitsKey: l?.waitsKey ?? null, stop: stops.get(id) ?? null,
           limit: l?.limit ?? null, resumed: l?.resumed ?? null, splitting: l ? await splittingOf(l) : null };
       }
       return out;

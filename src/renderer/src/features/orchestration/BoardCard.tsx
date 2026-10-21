@@ -4,7 +4,7 @@
 import { useState } from "react";
 import type { LocaleId, SessionBounds } from "../../../../shared/contracts";
 import type { OrchestrationAgentLink } from "../../../../shared/orchestration";
-import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, isCopy, startBase, taskText, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type ImportReport, type InboxRow, type InboxTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
+import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, externalInForce, isCopy, startBase, taskText, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type ImportReport, type InboxRow, type InboxTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
 import { t, type TranslationKey } from "../../lib/i18n";
 import { Dialog } from "./OrchestrationDialogs";
 import { ACTIVE_STATUSES, providerName, resetTime } from "./runModel";
@@ -44,6 +44,8 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
   const [showArchive, setShowArchive] = useState(false);
   const [form, setForm] = useState<{ task: BoardTask | null } | null>(null);
   const [accepting, setAccepting] = useState<string | null>(null);
+  const [marking, setMarking] = useState<string | null>(null); // F2: «Выполнено» asked for this external task (its note)
+  const [note, setNote] = useState("");
   const [anyway, setAnyway] = useState<string | null>(null); // «Start anyway» asked for this task
   const [message, setMessage] = useState<{ taskId: string | null; text: string } | null>(null);
   // F1 (T-2): «Import tasks» under way, and the report window (the button's result, or an inbox/ file's after «Import»)
@@ -86,6 +88,12 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
   const queueAct = async (action: "run" | "cancel", task: BoardTask) => { setOver(null); const f = failure(await board.queue(action, task.id)); if (f) say(task.id, f); };
   const mergeTask = async (task: BoardTask) => { setMerging(null); const f = failure(await board.merge(task.id, language)); if (f) say(task.id, f); };
   // E4 (stage-e-decomposition.md §10): «Split» / «Split again» start the decomposition run; «Do it whole» takes the mark off
+  // F2 (T-3): «Выполнено» (with the note) and «Снять отметку» of an external task
+  const markAct = async (task: BoardTask, done: boolean) => {
+    setMarking(null);
+    const f = failure(await board.external(task.id, done, done && note.trim() ? note : undefined));
+    if (f) say(task.id, f);
+  };
   const splitAct = async (task: BoardTask, action: "decompose" | "whole") => {
     const f = failure(await (action === "decompose" ? board.decompose(task.id, language) : board.update(task.id, { decompose: false })));
     if (f) say(task.id, f);
@@ -159,7 +167,11 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                   const fact = lineId ? view?.facts.find((f) => f.runId === lineId) : undefined;
                   const base = taskLine(locale, st, run ? { view: run.view, entries, open: run.open } : null, fact?.limit ?? null, fact?.providerLimit ?? null);
                   // what is asked, in the request's own words and the CLI's reason (answered in the run panel: one home for answers)
-                  const line = st.reason === "waits_permission" ? permissionLine(locale, base, (lineId ? orch.runs[lineId] : undefined)?.view.permission) : base;
+                  // F2: an external task in force — the person's mark is what it waits for, never a run
+                  const external = externalInForce(task, st);
+                  const depsOpen = task.dependsOn.some((d) => tasks.some((x) => x.id === d) && !board.statuses.get(d)?.done);
+                  const line = st.reason === "waits_permission" ? permissionLine(locale, base, (lineId ? orch.runs[lineId] : undefined)?.view.permission)
+                    : external && !st.done && !st.reason ? t(locale, "boardExternalWaits") : base;
                   // without checks, the conditions are met by the agents' word only
                   const met = run ? conditionsLine(locale, run.view) : null;
                   // shown once the run's feed is here: «0» before it loads would be a guess
@@ -171,7 +183,7 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                   const cost = run ? costLine(locale, "executor", run.view, entries) : null;
                   // «after T-2» while T-2 is not done and the line does not say so already
                   const open = task.dependsOn.filter((d) => !board.statuses.get(d)?.done);
-                  const after = open.length && st.reason !== "waits_task" ? tr(locale, "boardAfter", { keys: keysOf(open) }) : null;
+                  const after = open.length && st.reason !== "waits_task" && st.reason !== "waits_external" ? tr(locale, "boardAfter", { keys: keysOf(open) }) : null;
                   const archived = !!task.archivedAt;
                   // C1 (§4.4): «Done · in the board's result / merging / not merged: why», from the merge journals
                   const head = headOf(task);
@@ -198,6 +210,8 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                         {st.done && <span className={`board-task__badge board-task__badge--${st.done}`} aria-hidden="true">{st.done === "confirmed" ? "✓" : "✋"}</span>}
                         <span data-board-line-text>{line}</span>
                       </div>
+                      {task.external && <div className="board-task__line board-task__hint" data-board-external={external ? (st.done ? "done" : "waits") : "runs"}
+                        title={task.externalDone?.note ?? undefined}>{external ? t(locale, "boardExternal") : t(locale, "boardReason_external_has_runs")}{external && task.externalDone?.note ? ` · ${task.externalDone.note}` : ""}</div>}
                       {facts && <div className="board-task__line board-task__facts" data-board-facts title={facts}>{facts}</div>}
                       {asks > ASKS_HINT_OVER && <div className="board-task__line board-task__hint" data-board-asks-hint>{t(locale, "boardAsksHint")}</div>}
                       {st.depsNote && <div className="board-task__line board-task__hint" data-board-deps-note={st.depsNote}>{t(locale, `boardDepsNote_${st.depsNote}`)}</div>}
@@ -248,6 +262,14 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                           <button type="button" onClick={() => setAccepting(null)}>{t(locale, "orchCancel")}</button>
                         </div>
                       )}
+                      {marking === task.id && (
+                        <div className="board-task__confirm" role="alertdialog" aria-label={t(locale, "boardExternalDone")} data-board-external-confirm>
+                          <label className="orch-field">{t(locale, "boardExternalNote")}
+                            <input type="text" maxLength={300} value={note} onChange={(e) => setNote(e.target.value)} data-board-external-note /></label>
+                          <button type="button" className="orch-primary" data-board-external-yes onClick={() => void markAct(task, true)}>{t(locale, "boardExternalDone")}</button>
+                          <button type="button" onClick={() => setMarking(null)}>{t(locale, "orchCancel")}</button>
+                        </div>
+                      )}
                       {anyway === task.id && (
                         <div className="board-task__confirm" role="alertdialog" aria-label={t(locale, "boardStartAnyway")} data-board-anyway-confirm>
                           <p>{tr(locale, `boardStartAnywayWhy_${st.depsWait?.reason ?? "waits_task"}`, { keys: st.depsWait?.waitsFor.join(", ") ?? "" })}</p>
@@ -255,7 +277,7 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                           <button type="button" onClick={() => setAnyway(null)}>{t(locale, "orchCancel")}</button>
                         </div>
                       )}
-                      {!readOnly && accepting !== task.id && anyway !== task.id && (
+                      {!readOnly && accepting !== task.id && anyway !== task.id && marking !== task.id && (
                         <div className="board-task__actions">
                           {archived ? (
                             <button type="button" data-board-unarchive onClick={() => void board.archive(task.id, false)}>{t(locale, "boardUnarchive")}</button>
@@ -266,7 +288,11 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                                 <button type="button" data-board-over onClick={() => setOver(task.id)}>{t(locale, "boardQueuedOver")}</button>
                                 <button type="button" data-board-queue-cancel onClick={() => void queueAct("cancel", task)}>{t(locale, "boardQueuedCancel")}</button>
                               </>}
-                              {(st.column === "queue" || st.reason === "no_checks") && st.reason !== "run_newer" && !(queued && !queued.failed) && !unsplit(task, st) && (st.depsWait
+                              {/* F2 (§10): the external task's mark — the only «Done» it has; «Снять отметку» while no dependent began (main checks) */}
+                              {external && !st.done && <button type="button" className="orch-primary" data-board-external-done disabled={depsOpen}
+                                title={depsOpen ? t(locale, "orchError_deps_not_done") : undefined} onClick={() => { setNote(""); setMarking(task.id); }}>{t(locale, "boardExternalDone")}</button>}
+                              {external && st.done && <button type="button" data-board-external-undo onClick={() => void markAct(task, false)}>{t(locale, "boardExternalUndo")}</button>}
+                              {!external && (st.column === "queue" || st.reason === "no_checks") && st.reason !== "run_newer" && !(queued && !queued.failed) && !unsplit(task, st) && (st.depsWait
                                 ? <button type="button" data-board-start-anyway onClick={() => setAnyway(task.id)}>{t(locale, "boardStartAnyway")}</button>
                                 : <button type="button" data-board-start onClick={() => start(task)}>{t(locale, st.attempts ? "boardStartAgain" : "boardStart")}</button>)}
                               {/* E4: the actions of a parent's row (§2.1); «Stop» is the split run's panel's */}
@@ -418,7 +444,7 @@ function AutopilotRow({ locale, state, project, many, onSet, onBudget }: {
       {state?.on ? (
         <>
           <strong data-board-autopilot-on>{t(locale, "boardApOn")}</strong>
-          {state.waits && <span data-board-autopilot-waits={state.waits}>{state.waits === "provider_limit" && state.limit ? limitText(locale, state.limit) : tr(locale, `boardApWaits_${state.waits}`)}</span>}
+          {state.waits && <span data-board-autopilot-waits={state.waits}>{state.waits === "provider_limit" && state.limit ? limitText(locale, state.limit) : tr(locale, `boardApWaits_${state.waits}`, { key: state.waitsKey ?? "" })}</span>}
           {state.resumed && state.waits !== "provider_limit" && <span data-board-autopilot-resumed={state.resumed.key}>{tr(locale, "boardApResumed", { key: state.resumed.key, time: resetTime(locale, Date.parse(state.resumed.at)) })}</span>}
           {state.splitting && <span data-board-autopilot-splitting={state.splitting}>{tr(locale, "boardApDecomposing", { key: state.splitting })}</span>}
           <span data-board-autopilot-parallel>{tr(locale, "boardApOnParallel", { n: parallelOf(budget) })}</span>
@@ -631,7 +657,7 @@ function InboxLine({ locale, row, readOnly, onImport, onReject }: { locale: Loca
             const no = refused.get(x.ref);
             return (
               <li key={`${x.ref}|${x.title}|${x.project}`} data-board-inbox-task={x.ref} data-board-inbox-refused={no?.code} title={x.project}>
-                <b>{x.ref}</b> {x.title} · {x.project}{x.dependsOn.length ? ` · ${tr(locale, "boardAfter", { keys: x.dependsOn.join(", ") })}` : ""}
+                <b>{x.ref}</b> {x.title} · {x.project}{x.external ? ` · ${t(locale, "boardExternal")}` : ""}{x.dependsOn.length ? ` · ${tr(locale, "boardAfter", { keys: x.dependsOn.join(", ") })}` : ""}
                 {no && <span className="board-card__inbox-refused">{` · ${importText(locale, no.code, no.detail, no.ref, row.tasks)}`}</span>}
               </li>
             );

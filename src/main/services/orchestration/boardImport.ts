@@ -5,14 +5,14 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { ImportReport, InboxTask } from "../../../shared/taskBoard.ts";
-import { REF, WORKSPACE_ID, type ImportJob, type ImportRow, type ImportRows } from "./boardStore.ts";
+import { EXTERNAL_CRITERION, type ImportReport, type InboxTask } from "../../../shared/taskBoard.ts";
+import { isModels, REF, WORKSPACE_ID, type ImportJob, type ImportRow, type ImportRows } from "./boardStore.ts";
 
 export const IMPORT_MAX_BYTES = 1024 * 1024;
 const TOP = new Set(["format", "workspaceId", "workspace", "source", "tasks"]);
-const FIELDS = new Set(["ref", "project", "title", "text", "criteria", "dependsOn", "ifAbsent"]);
-// known fields of later stages: refused row by row until their stage is in (§5.1)
-const LATER: Record<string, string> = { external: "F2", models: "F2", issue: "F3", commitTitle: "F3", scope: "F4" };
+const FIELDS = new Set(["ref", "project", "title", "text", "criteria", "dependsOn", "ifAbsent", "external", "models"]);
+// known fields of later stages: refused row by row until their stage is in (§5.1); F2 takes external and models
+const LATER: Record<string, string> = { issue: "F3", commitTitle: "F3", scope: "F4" };
 
 // the open workspaces: by id (the check of workspaceOk) and by name (their title)
 export interface ImportWorkspaces { open(id: string): boolean; named(title: string): string[] }
@@ -94,12 +94,21 @@ export async function readTasksFile(file: string, bytes: Uint8Array, ws: ImportW
     if (!Array.isArray(deps) || deps.length > 64 || !deps.every((d) => typeof d === "string" && REF.test(d)) || new Set(deps).size !== deps.length) {
       no("invalid_task", "dependsOn: up to 64 distinct refs"); continue;
     }
-    // T-10: the requirements come from the project's plan; Loom does not make them up
-    if (o.criteria === undefined || (Array.isArray(o.criteria) && o.criteria.length === 0)) { no("no_criteria", "criteria: the task has none"); continue; }
+    if (o.external !== undefined && o.external !== true) { no("invalid_task", "external: true or absent"); continue; }
+    // T-4: strings by SAFE_MODEL, as a goal's models; null is not taken (no key: the profile's model)
+    if (o.models !== undefined && !(isModels(o.models) || (o.models && typeof o.models === "object" && !Array.isArray(o.models) && Object.keys(o.models).length === 0))) {
+      no("invalid_task", "models: {lead?, executor?, reviewer?} of model names (no null)"); continue;
+    }
+    // T-10: the requirements come from the project's plan; Loom does not make them up. T-3: an external task without
+    // them gets Loom's one line (a build before F2 needs ≥1 requirement)
+    const none = o.criteria === undefined || (Array.isArray(o.criteria) && o.criteria.length === 0);
+    if (none && o.external !== true) { no("no_criteria", "criteria: the task has none"); continue; }
     const project = await gitRoot(o.project);
     if (!project) { no("project_not_found", "project: an absolute path of an existing git repository's root"); continue; }
+    const models = isModels(o.models) ? o.models : undefined;
     rows.push({ ref, ifAbsent: o.ifAbsent === true, deps: deps as string[],
-      input: { workspaceId, project, title: o.title as string, text: o.text as string, criteria: o.criteria as string[] } });
+      input: { workspaceId, project, title: o.title as string, text: o.text as string, criteria: none ? [EXTERNAL_CRITERION] : o.criteria as string[] },
+      fields: { ...(o.external === true ? { external: true as const } : {}), ...(models ? { models: { ...models } } : {}) } });
   }
   return { job: { workspaceId, origin: { kind: "import", source: (doc.source as string | undefined) ?? null, file: file.slice(0, 255), sha256: sha }, rows } };
 }
@@ -137,6 +146,6 @@ export function inboxTasks(bytes: Uint8Array): InboxTask[] {
   const s = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
   return Array.isArray(doc?.tasks) ? doc.tasks.slice(0, 200).map((t: Record<string, unknown> | null) => ({
     ref: s(t?.ref, 32), title: s(t?.title, 200), project: s(t?.project, 4096),
-    dependsOn: Array.isArray(t?.dependsOn) ? t.dependsOn.slice(0, 64).map((d) => s(d, 32)) : []
+    dependsOn: Array.isArray(t?.dependsOn) ? t.dependsOn.slice(0, 64).map((d) => s(d, 32)) : [], external: t?.external === true
   })) : [];
 }
