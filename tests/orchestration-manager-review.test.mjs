@@ -267,7 +267,7 @@ function fakeIpc() {
     calls, replies,
     ipc: {
       invoke(channel, ...args) { const d = deferred(); calls.push([channel, ...args]); replies.push(d); return d.promise; },
-      on(channel, l) { assert.equal(channel, IPC.orchestrationEvent); onEvent = l; }
+      on(channel, l) { assert.ok(channel === IPC.orchestrationEvent || channel === IPC.orchestrationBoardEvent); if (channel === IPC.orchestrationEvent) onEvent = l; }
     },
     event: (seq, tick, status = "running") => onEvent({ runId: RUN, seq, tick, view: { status } }),
     channels: () => calls.map((c) => c[0])

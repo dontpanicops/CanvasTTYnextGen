@@ -63,6 +63,10 @@ import { ensureUtf8Locale } from "./services/utf8Locale";
 // before anything is spawned: every terminal, agent CLI and check inherits a UTF-8 locale (utf8Locale.ts)
 ensureUtf8Locale();
 
+// F1 (stage-f-external-projects.md §5.6): the smoke's file of «Import tasks» — only for an isolated run, both read here
+// before CANVASTTY_USER_DATA_DIR leaves the environment; the path leaves it at once (the CLIs started never inherit it)
+const smokeImport = { isolated: !!process.env.CANVASTTY_USER_DATA_DIR, smokeImportFile: process.env.CANVASTTY_SMOKE_IMPORT_FILE || null };
+delete process.env.CANVASTTY_SMOKE_IMPORT_FILE;
 if (process.env.CANVASTTY_USER_DATA_DIR) {
   if (!isAbsolute(process.env.CANVASTTY_USER_DATA_DIR)) throw new Error("CANVASTTY_USER_DATA_DIR must be absolute");
   app.setPath("userData", process.env.CANVASTTY_USER_DATA_DIR);
@@ -420,6 +424,7 @@ async function initializeServices(): Promise<void> {
     workspaces: workspaceStore,
     getMainWindow: () => mainWindow,
     notesToLog: hermeticSmoke(),
+    smokeImport,
     applyBrowserSettings: async (next) => {
       agentRuntimeBridge?.setCoreHooksEnabled(next.agentLifecycleHooksEnabled);
       terminalManager?.setLifecycleHooksEnabled(next.agentLifecycleHooksEnabled);
@@ -447,6 +452,8 @@ async function initializeServices(): Promise<void> {
     requestPluginCanvas,
     broadcastPluginStorageChange
   });
+  // F1 (§5.4): inbox/ and its poll while the application is open (macOS arm64 only: elsewhere neither is made)
+  void orchestration.inboxStart();
   servicesReady = true;
 }
 
@@ -533,6 +540,7 @@ function buildRunManager(): RunManager {
     platform: process.platform,
     workspaceOpen: (id) => workspaceStore?.isOpen(id) ?? false,
     workspaceKnown: (id) => workspaceStore?.get().workspaces.some((w) => w.id === id) ?? false,
+    workspaceNamed: (title) => workspaceStore?.get().workspaces.filter((w) => w.title === title && workspaceStore!.isOpen(w.id)).map((w) => w.id) ?? [],
     appVersion: () => app.getVersion(),
     // journal v2 and optional check commands (journal-v2-format.md §3.4): the person's once JOURNAL_V2_BY_DEFAULT is on
     // (off until the real series); before that only behind the development flag

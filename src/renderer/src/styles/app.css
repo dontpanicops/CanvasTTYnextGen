@@ -1421,6 +1421,17 @@ button { border: 0; }
 .board-card__autopilot-ask input { width: 4.5em; }
 .board-card__autopilot-stop { color: var(--text); }
 .board-card__head { margin: .4em .9em 0; font-size: .9em; color: var(--text-muted-on-dark); }
+/* F1: a file of inbox/ and the import report */
+.board-card__inbox-list { flex: 0 1 auto; max-height: 40%; overflow-y: auto; padding-bottom: .1em; }
+.board-card__inbox { display: flex; flex-wrap: wrap; align-items: center; gap: .4em .6em; margin: .4em .9em 0; padding: .45em .65em; border-radius: 9px; font-size: .9em; color: var(--text-muted-on-dark); background: var(--surface-soft); }
+.board-card__inbox strong { color: var(--text); }
+.board-card__inbox-tasks { flex: 1 0 100%; margin: 0; padding: 0; list-style: none; max-height: 8em; overflow-y: auto; }
+.board-card__inbox-tasks li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-card__inbox-tasks b { color: var(--text); }
+.board-card__inbox-refused { color: var(--yellow); }
+.board-card__inbox-actions { display: flex; gap: .4em; }
+.board-import { padding: 0 1em 1em; }
+.board-import__list { margin: 0; padding: 0; list-style: none; max-height: 50vh; overflow-y: auto; }
 .board-card__head strong { color: var(--text); }
 .board-card__head-line { display: flex; flex-wrap: wrap; align-items: center; gap: .5em; }
 .board-card__merge { margin-top: .4em; padding: .5em .7em; border-radius: 8px; background: rgba(255,255,255,.06); color: var(--text); }

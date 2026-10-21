@@ -276,8 +276,18 @@ const checked = <A extends unknown[], T>(parse: () => A, call: (...a: A) => Prom
   return call(...args);
 };
 
+// F1 (stage-f-external-projects.md §5.6): the file of «Import tasks». A smoke (f1.s10) names it instead of the dialog only
+// when the app runs isolated (CANVASTTY_USER_DATA_DIR was set) and CANVASTTY_SMOKE_IMPORT_FILE is an absolute path:
+// index.ts reads both before they leave the environment. Either one alone — the real dialog.
+export function importFilePicker(smoke: { isolated: boolean; smokeImportFile: string | null }, dialog: () => Promise<string | null>): () => Promise<string | null> {
+  const file = smoke.isolated && smoke.smokeImportFile?.startsWith("/") ? smoke.smokeImportFile : null;
+  return file ? async () => file : dialog;
+}
+
 // openPath: Electron's shell.openPath (the merge copy's folder, «Открыть папку»); absent in tests
-export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager, openPath?: (path: string) => Promise<string>): void {
+// win (F1): sending to the main window's webContents (its top frame), and main's own file dialog of «Import tasks»
+export interface OrchestrationWindow { send(channel: string, payload: unknown): void; pickImportFile(): Promise<string | null> }
+export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager, openPath?: (path: string) => Promise<string>, win?: OrchestrationWindow): void {
   // The current page of each webContents: runId -> its one subscription. A watch that is still being set up has
   // unwatch null; when it settles it stays only if its page is still current and the entry is still its own, otherwise
   // it is released at once (an unwatch, a newer watch, a reload or a closed window came first).
@@ -453,6 +463,15 @@ export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager
   }, async (action: HeadAction, ws: string, project: string, language: "ru" | "en"): Promise<OrchestrationResult<unknown>> => (action === "branch" ? manager.boardHeadBranch(ws, project)
     : action === "apply" ? manager.boardHeadApply(ws, project) : action === "update" ? manager.boardHeadUpdate(ws, project, language) : manager.boardHeadNew(ws, project))));
   // C2 (owner's decision 12): a start waiting for a place — over the limit now, or out of the queue
+  // F1 (§5.6): «Import tasks» takes no argument — the path is main's (the dialog); inbox/ files by name, never a path
+  handleMain(IPC.orchestrationBoardImportFile, (_e, ...args: unknown[]) => checked(() => (args.length ? bad("«Import tasks» takes no argument") : []) as [],
+    () => manager.boardImportFile(win ? () => win.pickImportFile() : async () => null)));
+  handleMain(IPC.orchestrationBoardInboxImport, (_e, file: unknown, sha256: unknown) => checked(() => {
+    if (typeof sha256 !== "string" || !SHA256.test(sha256)) bad("sha256 must be 64 lowercase hex digits");
+    return [str(file, "file", 260), sha256] as [string, string];
+  }, manager.boardInboxImport));
+  handleMain(IPC.orchestrationBoardInboxReject, (_e, file: unknown) => checked(() => [str(file, "file", 260)] as [string], manager.boardInboxReject));
+  if (win) manager.onBoardChange((e) => win.send(IPC.orchestrationBoardEvent, e));
   handleMain(IPC.orchestrationBoardQueue, (_e, action: unknown, taskId: unknown) => checked(() => {
     if (action !== "run" && action !== "cancel") bad("action must be run or cancel");
     return [action as "run" | "cancel", uuid(taskId, "taskId")] as ["run" | "cancel", string];

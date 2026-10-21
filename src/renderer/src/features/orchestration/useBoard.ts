@@ -60,6 +60,8 @@ export function useBoard(orch: Orchestration) {
     window.addEventListener("raoden:board-queued", onQueued);
     return () => window.removeEventListener("raoden:board-queued", onQueued);
   }, [reload]);
+  // F1 (stage-f-external-projects.md §5.6): main says inbox/ changed — a file came, changed or got its decision
+  useEffect(() => api.onBoardChange(() => void reload()), [api, reload]);
   // the task of a run (agent cards, the summary): from the facts main read in its goal
   const taskOfRun = useCallback((runId: string): BoardTask | null => {
     const f = view?.facts.find((x) => x.runId === runId);
@@ -93,7 +95,11 @@ export function useBoard(orch: Orchestration) {
     openMerge: (runId: string) => act(() => api.boardMergeOpen(runId)),
     head: (action: "branch" | "apply" | "new" | "update", workspaceId: string, project: string, language: "ru" | "en" = "en") => act(() => api.boardHead(action, workspaceId, project, language)),
     // C2 (decision 12): a start waiting for a place — over the limit now, or out of the queue
-    queue: (action: "run" | "cancel", taskId: string) => act(() => api.boardQueue(action, taskId))
+    queue: (action: "run" | "cancel", taskId: string) => act(() => api.boardQueue(action, taskId)),
+    // F1 (T-2): «Import tasks» (main opens the dialog and reads the file), «Import» / «Reject» of an inbox/ file
+    importFile: () => act(() => api.boardImportFile()),
+    inboxImport: (file: string, sha256: string) => act(() => api.boardInboxImport(file, sha256)),
+    inboxReject: (file: string) => act(() => api.boardInboxReject(file))
   };
 }
 

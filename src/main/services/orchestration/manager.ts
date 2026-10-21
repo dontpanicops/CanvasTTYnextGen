@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync } from "node:fs";
 import { mkdir, open, readdir, readFile, realpath, stat, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import type {
   OrchestrationActivityEvent,
@@ -53,15 +53,17 @@ import { canvasFile, createCanvasStore, folderHolder } from "./canvasStore.ts";
 import type { RunMode } from "./canvasStore.ts";
 import { createBoardMerge, markersLines, mergeRequirements } from "./boardMerge.ts";
 import { createBoardStore } from "./boardStore.ts";
+import { fileRefusal, importReport, readImportFile, readTasksFile, sha256 } from "./boardImport.ts";
+import { createInbox, inboxNameOk } from "./boardInbox.ts";
 import type { SplitTask, TaskInput } from "./boardStore.ts";
 import { boardStatuses, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, WAIT_PAUSES, type BoardHead } from "../../../shared/taskBoard.ts";
-import { AUTOPILOT_BUDGET, baseOf, type AutopilotBudget, type BoardPlace, type BoardTask, type BoardView, type RunTaskFacts } from "../../../shared/taskBoard.ts";
+import { AUTOPILOT_BUDGET, baseOf, type AutopilotBudget, type BoardPlace, type BoardTask, type BoardView, type ImportReport, type RunTaskFacts } from "../../../shared/taskBoard.ts";
 import type { OrchestrationRunView, OrchestrationTurnPurpose, OrchestrationWorkMode } from "../../../shared/orchestration.ts";
 import { viewCause } from "../../../shared/orchestrationPause.ts";
 import { runOwners, workspaceOf } from "../../../shared/workspaceOwnership.ts";
 import { createBoardAutopilot } from "./boardAutopilot.ts";
 import { COMMON_WORKSPACE_ID } from "../../../shared/contracts.ts";
-import { orchestrationAvailable } from "../../../shared/orchestration.ts";
+import { newInputsAvailable, orchestrationAvailable } from "../../../shared/orchestration.ts";
 import type {
   OrchestrationAgentLink,
   OrchestrationBounds,
@@ -116,12 +118,16 @@ export interface RunManagerDeps {
   // Does this workspace exist (hidden ones included)? A card of an unknown one is on the common canvas. Missing in a
   // plain-JS caller: every id counts as its own workspace (the raw comparison of before).
   workspaceKnown(workspaceId: string): boolean;
+  // F1 (stage-f-external-projects.md §5.1): the ids of the open workspaces of that name (title). Absent: none
+  workspaceNamed?(title: string): string[];
   // the Claude capability probe's waits: the first, and the one retry in the background (default 30 s and 90 s)
   claudeProbeMs?: { first: number; retry: number };
   appVersion?(): string; // written down when a newer version's link is let go
   // The machine's platform (process.platform by default). Where orchestrationAvailable() is false nothing new is
   // linked, started or continued; existing runs are read, stopped and unlinked. Engine tests on Linux pass "darwin".
   platform?: string;
+  // F1 (T-2): the machine's architecture (process.arch by default); the new inputs need darwin and arm64 (newInputsAvailable)
+  arch?: string;
 }
 
 export interface NativeOpts { direnv: boolean; direnvCwd?: string; worktreePending?: boolean }
@@ -282,14 +288,20 @@ export function createRunManager(deps: RunManagerDeps) {
     quiet: async () => ![...handles.values()].some((h) => h.view().active?.kind === "turn")
   });
 
+  const isOpen = (id: string) => (deps.workspaceOpen ?? ((w: string) => w === COMMON_WORKSPACE_ID))(id);
   const workspaceOk = (id: string) => {
-    if (!(deps.workspaceOpen ?? ((w: string) => w === COMMON_WORKSPACE_ID))(id)) refuse("workspace_unavailable", "no such open workspace");
+    if (!isOpen(id)) refuse("workspace_unavailable", "no such open workspace");
   };
   const notOpen = () => { if (closing) refuse("shutting_down", "the application is closing"); };
   const platform = deps.platform ?? process.platform;
   // Before any CLI, login shell, prepared dependency or model call.
   const platformOk = () => {
     if (!orchestrationAvailable(platform)) refuse("unsupported_platform", `orchestration is available only on macOS: project checks need its Seatbelt sandbox (this is ${platform})`);
+  };
+  // F1 (T-2): every new input of stage F — the import button, inbox/ and its poll, the external task's marks
+  const arch = deps.arch ?? process.arch;
+  const newInputOk = () => {
+    if (!newInputsAvailable(platform, arch)) refuse("unsupported_platform", `task import needs macOS on Apple silicon (this is ${platform}/${arch})`);
   };
   const runIdOk = (runId: unknown): string => (isUuid(runId) ? runId : refuse("invalid_argument", "runId must be a UUID"));
 
@@ -573,7 +585,7 @@ export function createRunManager(deps: RunManagerDeps) {
       await activityLog.open(runId);
       const workMode = req.goal.workMode ?? (req.goal.mode ? (await profiles.get(source))?.workMode ?? "project" : undefined);
       const { svc, rt } = await serviceWith(source, native, workMode === "worktree" ? "pending" : null);
-      const { prepareAuto, ...goal } = await resolveGoal(source, runId, req.goal, rt);
+      const { prepareAuto, ...goal } = await resolveGoal(source, runId, await withBoardRef(req.goal, inQueue), rt);
       own(await svc.createRun({ source, goal, runId, requestKey: key, prepareAuto }));
       if (rt) runRuntimes.set(runId, rt);
       return { runId, created: true };
@@ -594,6 +606,15 @@ export function createRunManager(deps: RunManagerDeps) {
     const item = testDbItem(await laravelTestDb(dir, undefined, { env: rt.env, worktree: fresh }));
     if (item.level === "blocker") refuse("test_database_unsafe", item.detail);
   }
+  // F1 (T-12): the task's external id comes from the board only: a ref in the goal is dropped (parseGoal refuses it from
+  // the window), the board task's ref is put in
+  async function withBoardRef(g: OrchestrationGoalInput, inQueue?: OrchestrationCanvas): Promise<OrchestrationGoalInput> {
+    if (!g.task || typeof g.task !== "object") return g; // not a task: checkTask refuses it
+    const t = (inQueue ? await board.peek() : await board.read()).board.tasks.find((x) => x.id === g.task!.id);
+    const { ref: _given, ...task } = g.task as OrchestrationGoalInput["task"] & { ref?: unknown }; // a ref in the goal is dropped
+    return { ...g, task: { ...task, ...(t?.ref ? { ref: t.ref } : {}) } };
+  }
+
   async function resolveGoal(source: string, runId: string, g: OrchestrationGoalInput, rt: NativeRuntime | null): Promise<GoalInput & { prepareAuto?: boolean }> {
     const { mode, finish, models: over, accessOverride: _override, ...given } = g;
     const chosen = roleModels(await profiles.get(source), over);
@@ -846,6 +867,36 @@ export function createRunManager(deps: RunManagerDeps) {
     }
     return out;
   }
+  // F1 (§5.2–§5.4): the report of a file; shown: write it if the rows are still the shown ones
+  // shown "any": «Import tasks» of the button — the person chose the file, what passes now is written
+  async function importFile(file: string, bytes: Uint8Array, shown: ImportReport | null | "any"): Promise<ImportReport> {
+    const read = await readTasksFile(file, bytes, { open: isOpen, named: (title) => deps.workspaceNamed?.(title) ?? [] });
+    if ("report" in read) return read.report;
+    const { job } = read;
+    const sha = job.origin.sha256;
+    const rowsOf = (r: Pick<ImportReport, "code" | "workspaceId" | "created" | "updated" | "unchanged" | "refused">) =>
+      JSON.stringify([r.code, r.workspaceId, r.created.map((x) => x.ref), r.updated.map((x) => x.ref), r.unchanged, r.refused.map((x) => [x.ref, x.code])]);
+    const started = async () => new Set([...startingTasks.keys(), ...(await taskFacts()).flatMap((f) => (f.taskId ? [f.taskId] : []))]);
+    try {
+      const r = await board.importTasks(job, started, shown === "any" ? () => true : shown && ((rows) => rowsOf({ code: null, workspaceId: job.workspaceId, ...rows }) === rowsOf(shown)));
+      return importReport(file, sha, r.accepted ? "imported" : "checked", job.workspaceId, r.rows);
+    } catch (error) {
+      const code = (error as { code?: unknown })?.code;
+      if (code === "board_unavailable" || code === "board_newer_version" || code === "too_many_tasks") return fileRefusal(file, sha, code, String((error as Error).message), job.workspaceId);
+      throw error;
+    }
+  }
+  async function applyImport(file: string, bytes: Uint8Array, shown: ImportReport): Promise<{ report: ImportReport; changed: null | "file_changed" | "report_changed" }> {
+    notOpen();
+    if (sha256(bytes) !== shown?.sha256) return { report: await importFile(file, bytes, null), changed: "file_changed" };
+    const report = await importFile(file, bytes, shown);
+    return { report, changed: report.status === "imported" ? null : "report_changed" };
+  }
+  // F1 (§5.4, §5.6): inbox/ — created and polled only by inboxStart (the application's start), on macOS arm64 only
+  const boardListeners = new Set<(e: { kind: "inbox" }) => void>();
+  const inbox = createInbox({ dir: join(deps.root, "inbox"), check: (file, bytes) => importFile(file, bytes, null), apply: applyImport,
+    changed: () => { for (const l of boardListeners) { try { l({ kind: "inbox" }); } catch { /* its own */ } } } });
+  const inboxName = (file: unknown): string => (typeof file === "string" && inboxNameOk(file) ? file : refuse("invalid_argument", "a file of inbox/ by its name"));
   async function boardView(): Promise<BoardView> {
     const r = await board.read();
     const places = [...new Map(r.board.tasks.map((t) => [`${t.workspaceId}\0${t.project}`, { workspaceId: t.workspaceId, project: t.project }])).values()];
@@ -862,7 +913,7 @@ export function createRunManager(deps: RunManagerDeps) {
     const facts = await taskFacts();
     if (splitsPending(r.board, facts).length) watchDecompositions(); // E2: also after a restart (§3.4)
     return { board: r.board, readOnly: r.readOnly, facts: facts.filter((f) => f.taskId || f.taskKey || f.decompositionOf), autopilot: await autopilot.state(),
-      ...(heads.length ? { heads } : {}), ...(queued.length ? { queued } : {}) };
+      ...(heads.length ? { heads } : {}), ...(queued.length ? { queued } : {}), ...(inbox.rows().length ? { inbox: inbox.rows() } : {}) };
   }
   // C1 (§4.5): «Объединить» — a task «Done» in a separate copy into its place's head (started if it has none); its result
   // branch is made first, if it has none (the same as decision 8)
@@ -1332,6 +1383,31 @@ export function createRunManager(deps: RunManagerDeps) {
       workspaceOk(input?.workspaceId);
       return board.create({ ...input, project: await realpath(input.project).catch(() => refuse("invalid_task", "the project folder does not exist")) });
     }),
+    // F1 (stage-f-external-projects.md §5.4): the check of a board-tasks/v1 file (nothing is written: checked,
+    // invalid_file or refused) and «Import» of the report the person was shown. «Import» reads the file again: another
+    // sha256 — file_changed and the new check; the same — checked again against the board as it is, and written only
+    // if its rows are the shown ones (in one write), otherwise report_changed and the new report waits for a second
+    // «Import». Reading the file (inbox/, the dialog), the platform and the window are the caller's (T-2). An import
+    // only puts tasks on the board: no «Done», no start, no deletion, no acceptance, no merge (principle 8).
+    boardImportCheck: (file: string, bytes: Uint8Array) => result(() => importFile(file, bytes, null)),
+    boardImportApply: (file: string, bytes: Uint8Array, shown: ImportReport) => result(() => applyImport(file, bytes, shown)),
+    // T-2: «Import tasks» — pick is main's file dialog (registerIpc), the window never names a path; null: closed unchosen
+    boardImportFile: (pick: () => Promise<string | null>) => result(async (): Promise<ImportReport | null> => {
+      newInputOk();
+      notOpen();
+      const path = await pick();
+      if (!path) return null;
+      const name = basename(path).slice(0, 255);
+      const read = await readImportFile(path, name);
+      return "report" in read ? read.report : importFile(name, read.bytes, "any");
+    }),
+    // T-2: inbox/ — its folders and its poll (the application's start; tests call it), the person's decision on a file
+    inboxStart: () => result(async () => { newInputOk(); notOpen(); await inbox.start(); return null; }),
+    inboxScan: () => inbox.scan(), // tests: one poll now
+    boardInboxImport: (file: string, sha: string) => result(() => { newInputOk(); notOpen(); return inbox.import(inboxName(file), sha); }),
+    boardInboxReject: (file: string) => result(() => { newInputOk(); notOpen(); return inbox.reject(inboxName(file)); }),
+    // §5.6: main → window «inbox/ changed» (registerOrchestrationIpc sends it to the main window)
+    onBoardChange: (listener: (e: { kind: "inbox" }) => void) => { boardListeners.add(listener); return () => { boardListeners.delete(listener); }; },
     // E2: «Do it whole» is refused while the task is being split (the store refuses it with live subtasks)
     boardUpdate: (id: string, patch: Parameters<typeof board.update>[1]) => result(async () => {
       if (patch?.decompose === false) {
@@ -1680,6 +1756,7 @@ export function createRunManager(deps: RunManagerDeps) {
       if (splitTimer) clearInterval(splitTimer);
       splitTimer = null;
       await splitTick;
+      await inbox.stop();
       await resolutionTick; // a merge moving in an agent's tree finishes its write before the stores close
       autopilot.shutdown();
       if (queueTimer) { clearInterval(queueTimer); queueTimer = null; }

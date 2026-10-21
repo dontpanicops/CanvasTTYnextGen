@@ -124,10 +124,11 @@ export interface OrchestrationGoalInput {
 }
 export interface OrchestrationBaseRef { branch: string; commit: string; key: string }
 
-import type { AutopilotBudget, AutopilotState, BoardPlace, BoardTask, BoardTaskInput, BoardTaskPatch, BoardView } from "./taskBoard.ts";
+import type { AutopilotBudget, AutopilotState, BoardPlace, BoardTask, BoardTaskInput, BoardTaskPatch, BoardView, ImportReport } from "./taskBoard.ts";
 
 // A task of the board, as a run's goal names it: its id in orchestration/board.json and its number for people.
-export interface OrchestrationTaskRef { id: string; key: string }
+// ref (F1, T-12): set by main from the board only; parseGoal refuses it from the window
+export interface OrchestrationTaskRef { id: string; key: string; ref?: string }
 
 export interface OrchestrationCreateRequest {
   requestId: string; // UUID chosen by the renderer; it becomes the runId, so a repeat never creates a second run
@@ -568,6 +569,11 @@ export function closedByPerson(f: { status: string; history: readonly { kind: st
 export function orchestrationAvailable(platform: string): boolean {
   return platform === "darwin";
 }
+// F1 (stage-f-external-projects.md T-2, §5.5): the new inputs of stage F (task import, inbox/, the external task's
+// marks) are macOS on Apple silicon only; orchestrationAvailable (stages A–E) stays as it is
+export function newInputsAvailable(platform: string, arch: string): boolean {
+  return platform === "darwin" && arch === "arm64";
+}
 
 export interface OrchestrationApi {
   available: boolean; // orchestrationAvailable() on this machine: the renderer greys out what main would refuse
@@ -643,6 +649,15 @@ export interface OrchestrationApi {
     | { runId: string } | { already: true }>>;
   // C2 (owner's decision 12): a task's start waiting for a free place — «run»: over the limit now (confirmed), «cancel»
   boardQueue(action: "run" | "cancel", taskId: string): Promise<OrchestrationResult<{ runId: string } | null>>;
+  // F1 (stage-f-external-projects.md §5.6). newInputs: newInputsAvailable() here (the renderer greys out what main refuses).
+  // boardImportFile: «Import tasks» — main opens the file dialog, reads the file and imports it (null: the dialog was
+  // closed); the window never names a path. boardInboxImport / boardInboxReject: the person's decision on a file of
+  // inbox/ by its name and the shown sha256 (another one — file_changed). onBoardChange: main says inbox/ changed.
+  newInputs: boolean;
+  boardImportFile(): Promise<OrchestrationResult<ImportReport | null>>;
+  boardInboxImport(file: string, sha256: string): Promise<OrchestrationResult<ImportReport>>;
+  boardInboxReject(file: string): Promise<OrchestrationResult<null>>;
+  onBoardChange(listener: (e: { kind: "inbox" }) => void): () => void;
   // The same checks the start makes, without starting anything (no model, no run).
   // full: «Проверить сейчас» — also the preparation and the commands on the source (a temporary work folder), within timeoutMs
   readiness(input: { linkId: string; commands: string[]; workMode: OrchestrationWorkMode; models?: Partial<OrchestrationRoleModels>; accessOverride?: Partial<Record<"claude" | "codex", "terminal">>; full?: boolean; timeoutMs?: number }): Promise<OrchestrationResult<OrchestrationReadiness>>;
