@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- The repository is renamed to `github.com/dontpanicops/raoden-loom` (after the product); the old address redirects. The links in the package, the README and the docs, and the release publishing point there. Technical identifiers (`canvastty`, appId, the data folder) stay.
+
 ## 1.5.20 — 2026-10-19
 
 A merge conflict can be handed to an agent; at a provider's usage limit the board's autopilot waits and continues by itself; the board tells you when a merge waits for you.
