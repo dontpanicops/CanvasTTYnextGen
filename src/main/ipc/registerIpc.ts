@@ -28,7 +28,7 @@ import type { GithubAuthService } from "../services/GithubAuthService";
 import type { HermesHudService } from "../services/HermesHudService";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
 import { assertMainRenderer } from "./mainRenderer";
-import { registerOrchestrationIpc } from "./orchestrationIpc";
+import { importFilePicker, registerOrchestrationIpc } from "./orchestrationIpc";
 import type { RunManager } from "../services/orchestration/manager";
 import type { WorkspaceStore } from "../services/WorkspaceStore";
 import type { CameraState } from "../../shared/contracts";
@@ -45,6 +45,8 @@ const MEDIA_MIME: Record<string, string> = {
 interface Dependencies {
   // a hermetic smoke of the development build: notifications go to stdout, never to the machine's Notification Center
   notesToLog?: boolean;
+  // F1 (stage-f-external-projects.md §5.6): read by index.ts before the variables leave the environment
+  smokeImport?: { isolated: boolean; smokeImportFile: string | null };
   settings: SettingsStore;
   terminals: TerminalManager;
   limits: LimitsService;
@@ -88,7 +90,8 @@ export function registerIpc({
   requestPluginLauncher,
   requestPluginCanvas,
   broadcastPluginStorageChange,
-  notesToLog = false
+  notesToLog = false,
+  smokeImport = { isolated: false, smokeImportFile: null }
 }: Dependencies): void {
   // Every channel is available only to the main renderer unless it authenticates its own sender.
   const handleMain = (
@@ -107,7 +110,16 @@ export function registerIpc({
       listener(event, ...args);
     });
   };
-  registerOrchestrationIpc(handleMain, orchestration, (path) => shell.openPath(path));
+  registerOrchestrationIpc(handleMain, orchestration, (path) => shell.openPath(path), {
+    send: (channel, payload) => { const w = getMainWindow(); if (w && !w.isDestroyed()) w.webContents.send(channel, payload); },
+    // «Import tasks»: main's own dialog (openFile, .json), as IPC.dialogPickDirectory; the window never names the path
+    pickImportFile: importFilePicker(smokeImport, async () => {
+      const owner = getMainWindow();
+      const options: OpenDialogOptions = { title: "Choose a tasks file", properties: ["openFile"], filters: [{ name: "JSON", extensions: ["json"] }] };
+      const result = owner && !owner.isDestroyed() ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    })
+  });
   const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
   const requestPluginBrowserOpen = async (pluginId: string, value: unknown): Promise<void> => {
     plugins.assertPermission(pluginId, "browser:open");

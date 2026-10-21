@@ -4,7 +4,7 @@
 import { useState } from "react";
 import type { LocaleId, SessionBounds } from "../../../../shared/contracts";
 import type { OrchestrationAgentLink } from "../../../../shared/orchestration";
-import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, isCopy, startBase, taskText, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
+import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, isCopy, startBase, taskText, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type ImportReport, type InboxRow, type InboxTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
 import { t, type TranslationKey } from "../../lib/i18n";
 import { Dialog } from "./OrchestrationDialogs";
 import { ACTIVE_STATUSES, providerName, resetTime } from "./runModel";
@@ -46,6 +46,10 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
   const [accepting, setAccepting] = useState<string | null>(null);
   const [anyway, setAnyway] = useState<string | null>(null); // «Start anyway» asked for this task
   const [message, setMessage] = useState<{ taskId: string | null; text: string } | null>(null);
+  // F1 (T-2): «Import tasks» under way, and the report window (the button's result, or an inbox/ file's after «Import»)
+  const [importing, setImporting] = useState(false);
+  const [report, setReport] = useState<ImportReport | null>(null);
+  const newInputs = window.canvasTTY.orchestration.newInputs;
   const view = board.view;
   const readOnly = !!view?.readOnly;
   const tasks = (view?.board.tasks ?? []).filter((x) => x.workspaceId === workspaceId);
@@ -102,6 +106,14 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
         {readOnly && <span className="board-card__readonly" role="status">{t(locale, "boardReadOnly")}</span>}
         <span className="board-card__header-actions">
           <button type="button" data-board-new disabled={readOnly} onClick={() => setForm({ task: null })}>{t(locale, "boardNewTask")}</button>
+          <button type="button" data-board-import disabled={readOnly || !newInputs || importing} aria-busy={importing}
+            title={newInputs ? undefined : t(locale, "boardImportCode_unsupported_platform")} onClick={async () => {
+              setImporting(true);
+              const r = await board.importFile();
+              setImporting(false);
+              if (!r.ok) say(null, importText(locale, r.code, r.message));
+              else if (r.value) setReport(r.value);
+            }}>{importing ? `${t(locale, "boardImport")}…` : t(locale, "boardImport")}</button>
           <button type="button" data-board-archive-toggle aria-pressed={showArchive} onClick={() => setShowArchive((v) => !v)}>
             {t(locale, showArchive ? "boardHideArchive" : "boardShowArchive")}</button>
           <button type="button" className="board-card__hide" data-board-hide title={t(locale, "boardHide")} aria-label={t(locale, "boardHide")} onClick={props.onHide}>×</button>
@@ -115,6 +127,16 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
       {view && !readOnly && heads.map((h) => (
         <HeadRow key={h.ref} locale={locale} head={h} tasks={tasks} statuses={board.statuses} facts={view.facts} board={board} workspaceId={workspaceId} say={(text) => say(null, text)} failure={failure} openRun={(id) => ui.openRunById(id)} />
       ))}
+      {!!view?.inbox?.some((r) => (r.workspaceId ?? workspaceId) === workspaceId) && <div className="board-card__inbox-list" data-wheel-owner="local">
+      {(view?.inbox ?? []).filter((r) => (r.workspaceId ?? workspaceId) === workspaceId).map((r) => (
+        <InboxLine key={r.file} locale={locale} row={r} readOnly={readOnly}
+          onImport={async () => {
+            const x = await board.inboxImport(r.file, r.sha256);
+            if (!x.ok) say(null, importText(locale, x.code, x.message));
+            else setReport(x.value); // imported — the result; checked — the board moved on: the new report, a second «Import»
+          }}
+          onReject={async () => { const x = await board.inboxReject(r.file); if (!x.ok) say(null, importText(locale, x.code, x.message)); }} />
+      ))}</div>}
       {board.failed && !view && <p className="board-card__message" role="alert">{t(locale, "boardLoadFailed")} ({board.failed})</p>}
       {message && !message.taskId && <p className="board-card__message" role="alert">{message.text}</p>}
       {view && tasks.length === 0 && <p className="board-card__empty" data-board-empty>{t(locale, "boardEmpty")}</p>}
@@ -283,6 +305,11 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
         <div key={direction} className={`terminal-card__resize-handle terminal-card__resize-handle--${direction}`} aria-hidden="true" data-board-resize={direction}
           {...frame.handle(direction)} />
       ))}
+      {report && (
+        <Dialog label={t(locale, "boardImport")} onClose={() => setReport(null)} locale={locale}>
+          <ImportReportView locale={locale} report={report} tasks={view?.inbox?.find((r) => r.file === report.file)?.tasks ?? []} />
+        </Dialog>
+      )}
       {form && (
         <TaskForm locale={locale} task={form.task} splitLocked={!!form.task && ((board.statuses.get(form.task.id)?.attempts ?? 0) > 0 || tasks.some((x) => x.parentId === form.task!.id && !x.archivedAt))} tasks={tasks.filter((x) => !x.archivedAt)} projects={projects}
           dependents={form.task ? tasks.filter((x) => x.dependsOn.includes(form.task!.id)) : []}
@@ -551,6 +578,72 @@ function HeadRow({ locale, head, tasks, statuses, facts, board, workspaceId, say
             <button type="button" data-board-merge-skip onClick={async () => { setAnswer(null); const f = failure(await board.skip(waits.runId)); if (f) say(f); }}>{t(locale, "boardMergeSkip")}</button>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// F1 (stage-f-external-projects.md §10): the codes of the import window — one family, boardImportCode_<code>; the
+// placeholders from the refused row (its ref, detail) and the file's own rows (the project of a ref). A dependency's
+// refusal names the dependency: its ref is in the detail (boardStore: «dependsOn: no task X …», «dependsOn: X is refused»)
+function importText(locale: LocaleId, code: string, detail = "", rowRef: string | null = null, tasks: InboxTask[] = []): string {
+  const key = `boardImportCode_${code}`;
+  const ref = code === "unknown_dependency" || code === "dependency_refused" ? /dependsOn: (?:no task )?([A-Za-z0-9][A-Za-z0-9-]*)/.exec(detail)?.[1] ?? "" : rowRef;
+  if (!t(locale, key as TranslationKey)) return tr(locale, `orchError_${code}`) || detail || code;
+  return tr(locale, key, { ref: ref ?? "", detail, field: /(\S+) is taken from stage/.exec(detail)?.[1] ?? "", name: /are named (.*)$/.exec(detail)?.[1] ?? "",
+    path: tasks.find((x) => x.ref === ref)?.project ?? "" });
+}
+const reportLine = (locale: LocaleId, r: ImportReport) =>
+  tr(locale, "boardImportReport", { file: r.file, c: r.created.length, u: r.updated.length, n: r.unchanged.length, r: r.refused.length });
+
+// «Import tasks» and «Import»: what was created, updated, left unchanged and refused (a code and its words)
+function ImportReportView({ locale, report, tasks }: { locale: LocaleId; report: ImportReport; tasks: InboxTask[] }): React.JSX.Element {
+  return (
+    <div className="board-import" data-board-import-report={report.status} data-wheel-owner="local">
+      <p data-board-import-line>{reportLine(locale, report)}</p>
+      <ul className="board-import__list">
+        {report.created.map((x) => <li key={`c${x.ref}`} data-board-import-created={x.ref}>+ {x.ref} → {x.key}</li>)}
+        {report.updated.map((x) => <li key={`u${x.ref}`} data-board-import-updated={x.ref}>~ {x.ref} → {x.key}</li>)}
+        {report.unchanged.map((ref) => <li key={`n${ref}`} data-board-import-unchanged={ref}>= {ref}</li>)}
+        {report.refused.map((x) => <li key={`r${x.ref}|${x.code}|${x.detail}`} className="orch-hint orch-hint--warn" data-board-import-refused={x.code} title={x.detail}>
+          × {x.ref ? `${x.ref}: ` : ""}{importText(locale, x.code, x.detail, x.ref, tasks)}</li>)}
+      </ul>
+    </div>
+  );
+}
+
+// F1 (§5.4, §10): a file of inbox/ — checked: its rows and «Import / Reject» (every row refused: «Reject» only);
+// invalid_file, refused: its code, no decision (it is in done/ already)
+function InboxLine({ locale, row, readOnly, onImport, onReject }: { locale: LocaleId; row: InboxRow; readOnly: boolean; onImport(): Promise<void>; onReject(): Promise<void> }): React.JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const r = row.report;
+  const checked = r.status === "checked";
+  const refused = new Map(r.refused.filter((x) => x.ref).map((x) => [x.ref, x]));
+  const importable = r.created.length + r.updated.length + r.unchanged.length > 0;
+  const act = (fn: () => Promise<void>) => async () => { setBusy(true); try { await fn(); } finally { setBusy(false); } };
+  return (
+    <div className="board-card__inbox" data-board-inbox={row.file} data-board-inbox-status={r.status}>
+      <strong>{tr(locale, "boardInboxRow", { file: row.file, n: row.tasks.length, k: r.refused.length })}</strong>
+      {!checked && r.code && <span data-board-inbox-code={r.code} title={r.refused[0]?.detail}>{` · ${importText(locale, r.code, r.refused[0]?.detail ?? "", null, row.tasks)}`}</span>}
+      {checked && (
+        <ul className="board-card__inbox-tasks">
+          {row.tasks.map((x) => {
+            const no = refused.get(x.ref);
+            return (
+              <li key={`${x.ref}|${x.title}|${x.project}`} data-board-inbox-task={x.ref} data-board-inbox-refused={no?.code} title={x.project}>
+                <b>{x.ref}</b> {x.title} · {x.project}{x.dependsOn.length ? ` · ${tr(locale, "boardAfter", { keys: x.dependsOn.join(", ") })}` : ""}
+                {no && <span className="board-card__inbox-refused">{` · ${importText(locale, no.code, no.detail, no.ref, row.tasks)}`}</span>}
+              </li>
+            );
+          })}
+          {r.refused.filter((x) => !x.ref).map((x) => <li key={`f${x.code}|${x.detail}`} className="board-card__inbox-refused" data-board-inbox-refused={x.code}>{importText(locale, x.code, x.detail, null, row.tasks)}</li>)}
+        </ul>
+      )}
+      {checked && !readOnly && (
+        <span className="board-card__inbox-actions">
+          <button type="button" className="orch-primary" data-board-inbox-import disabled={busy || !importable} onClick={act(onImport)}>{t(locale, "boardInboxImport")}</button>
+          <button type="button" data-board-inbox-reject disabled={busy} onClick={act(onReject)}>{t(locale, "boardInboxReject")}</button>
+        </span>
       )}
     </div>
   );

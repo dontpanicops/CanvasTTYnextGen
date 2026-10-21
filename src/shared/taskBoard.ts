@@ -27,6 +27,26 @@ export interface BoardTask {
   decomposedBy?: string; // a parent: the decomposition run its subtasks were made by (written by the same write as they are)
   parentId?: string; // a subtask: its parent (same workspace and folder)
   covers?: string[]; // a subtask: the parent's requirements it covers, "R1".."R32"
+  // F1 (stage-f-external-projects.md §5.1): a task imported from a board-tasks/v1 file — its ref there (the upsert key
+  // within the workspace) and where it came from. A bad value in the file is dropped, the board is never set aside
+  ref?: string;
+  origin?: BoardTaskOrigin;
+}
+export interface BoardTaskOrigin { kind: "import"; source: string | null; file: string; sha256: string }
+
+// F1 (§5.4): the report of a board-tasks/v1 file, board-tasks-report/v1
+export interface ImportReport {
+  format: "board-tasks-report/v1";
+  file: string;
+  sha256: string;
+  at: string;
+  status: "checked" | "imported" | "rejected" | "invalid_file" | "refused";
+  code: string | null; // a file-level code (§5.3), only with refused and invalid_file
+  workspaceId: string | null;
+  created: { ref: string; key: string }[];
+  updated: { ref: string; key: string }[];
+  unchanged: string[];
+  refused: { ref: string | null; code: string; detail: string }[]; // ref null: the file-level refusal
 }
 
 export interface BoardTaskInput {
@@ -49,7 +69,14 @@ export interface BoardView {
   autopilot: Record<string, AutopilotState>; // linkId → the board's autopilot of that link, as main holds it now
   heads?: BoardHead[]; // C1: the board's merged head of each workspace and project that has one
   queued?: QueuedStart[]; // C2 (owner's decision 12): task starts waiting for a free place, in order
+  inbox?: InboxRow[]; // F1 (stage-f-external-projects.md §5.4): the files of inbox/ as main last checked them
 }
+
+// F1 (§5.4, §5.6): a file of <userData>/orchestration/inbox/ — checked (waits for «Import» / «Reject»), or set aside to
+// done/ at once (invalid_file, refused: shown with its code, no decision). tasks: the file's rows as written there, for
+// the window's list (ref, title, project, dependsOn); [] when the file could not be read
+export interface InboxRow { file: string; sha256: string; workspaceId: string | null; report: ImportReport; tasks: InboxTask[] }
+export interface InboxTask { ref: string; title: string; project: string; dependsOn: string[] }
 
 // C2 (owner's decision 12): a person's start of a task that waits for a free place of the project (in main's memory)
 export interface QueuedStart {
@@ -500,14 +527,14 @@ export function profileGoal(profile: Pick<OrchestrationProjectProfile, "checks" 
 
 // The goal of a task's start by the autopilot: the task's text and requirements, the settings as they are, in the
 // autopilot mode, from the base its dependency left (owner's decision 11).
-export function goalFor(task: Pick<BoardTask, "id" | "key" | "text" | "criteria" | "decompose" | "decomposedBy">, profile: Pick<OrchestrationProjectProfile, "checks" | "workMode" | "finish" | "models">,
+export function goalFor(task: Pick<BoardTask, "id" | "key" | "ref" | "text" | "criteria" | "decompose" | "decomposedBy">, profile: Pick<OrchestrationProjectProfile, "checks" | "workMode" | "finish" | "models">,
   opts: { optionalChecks: boolean; language: "ru" | "en"; base: OrchestrationBaseRef | null; tasks?: readonly BoardTask[] }): OrchestrationGoalInput {
   const p = profileGoal(profile);
   const finish = p.workMode !== "copy" && p.finish.commit ? { finish: p.finish } : {};
   return {
     ...(opts.optionalChecks ? { models: p.models } : {}),
     text: taskText(task, opts.tasks ?? [], opts.language), criteria: [...task.criteria], checks: [], commands: p.commands, workMode: p.workMode, mode: "autopilot", reviewPlan: false,
-    language: opts.language, task: { id: task.id, key: task.key }, ...finish, limits: {},
+    language: opts.language, task: { id: task.id, key: task.key, ...(task.ref ? { ref: task.ref } : {}) }, ...finish, limits: {},
     ...(opts.base && (p.workMode === "copy" || p.workMode === "worktree") ? { base: opts.base } : {})
   };
 }

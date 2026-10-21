@@ -1,7 +1,7 @@
 // window.canvasTTY.orchestration (stage-7-contract.md §3). No electron import: preload/index.ts passes its ipcRenderer
 // calls in, tests pass fakes.
 import { IPC } from "../shared/contracts.ts";
-import { orchestrationAvailable } from "../shared/orchestration.ts";
+import { newInputsAvailable, orchestrationAvailable } from "../shared/orchestration.ts";
 import type {
   OrchestrationActivityEvent,
   OrchestrationApi,
@@ -12,19 +12,20 @@ import type {
 
 export interface OrchestrationIpc {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
-  on(channel: string, listener: (payload: OrchestrationRunEvent | OrchestrationActivityEvent) => void): void;
+  on(channel: string, listener: (payload: never) => void): void; // each channel's listener names its payload
 }
 
 type Stamp = readonly [number, number];
 const newer = (a: Stamp, b: Stamp) => a[0] > b[0] || (a[0] === b[0] && a[1] > b[1]);
 
-export function createOrchestrationClient(ipc: OrchestrationIpc, platform: string): OrchestrationApi {
+// arch: process.arch of the preload (F1: the new inputs need Apple silicon); absent — the new inputs show as unavailable
+export function createOrchestrationClient(ipc: OrchestrationIpc, platform: string, arch = ""): OrchestrationApi {
   // Listeners per run on this page. The first one asks main for the page's one subscription (watch); the others only
   // read the current state (get); the last one to leave releases it (unwatch).
   const runs = new Map<string, Set<(e: OrchestrationRunEvent) => void>>();
   const activity = new Map<string, Set<(e: OrchestrationActivityEvent) => void>>();
   // One channel: a run state has `view`, an activity batch has `entries`.
-  ipc.on(IPC.orchestrationEvent, (e) => {
+  ipc.on(IPC.orchestrationEvent, (e: OrchestrationRunEvent | OrchestrationActivityEvent) => {
     if (e && Array.isArray((e as OrchestrationActivityEvent).entries)) {
       for (const l of activity.get(e.runId) ?? []) { try { l(e as OrchestrationActivityEvent); } catch { /* its own */ } }
       return;
@@ -32,8 +33,15 @@ export function createOrchestrationClient(ipc: OrchestrationIpc, platform: strin
     for (const deliver of runs.get(e?.runId) ?? []) deliver(e as OrchestrationRunEvent);
   });
 
+  // F1 (§5.6): main says inbox/ changed; the board reads itself again
+  const boardChange = new Set<(e: { kind: "inbox" }) => void>();
+  ipc.on(IPC.orchestrationBoardEvent, (e: { kind: "inbox" }) => {
+    for (const l of boardChange) { try { l(e); } catch { /* its own */ } }
+  });
+
   return {
     available: orchestrationAvailable(platform),
+    newInputs: newInputsAvailable(platform, arch),
     catalog: () => ipc.invoke(IPC.orchestrationCatalog),
     list: () => ipc.invoke(IPC.orchestrationList),
     get: (runId) => ipc.invoke(IPC.orchestrationGet, runId),
@@ -74,6 +82,10 @@ export function createOrchestrationClient(ipc: OrchestrationIpc, platform: strin
     boardMergeOpen: (runId) => ipc.invoke(IPC.orchestrationBoardMergeOpen, runId),
     boardHead: (action, workspaceId, project, language) => ipc.invoke(IPC.orchestrationBoardHead, action, workspaceId, project, language ?? "en"),
     boardQueue: (action, taskId) => ipc.invoke(IPC.orchestrationBoardQueue, action, taskId),
+    boardImportFile: () => ipc.invoke(IPC.orchestrationBoardImportFile),
+    boardInboxImport: (file, sha256) => ipc.invoke(IPC.orchestrationBoardInboxImport, file, sha256),
+    boardInboxReject: (file) => ipc.invoke(IPC.orchestrationBoardInboxReject, file),
+    onBoardChange(listener) { boardChange.add(listener); return () => { boardChange.delete(listener); }; },
     readiness: (input) => ipc.invoke(IPC.orchestrationReadiness, input),
     profile: (linkId, capabilities) => ipc.invoke(IPC.orchestrationProfileGet, linkId, capabilities === true),
     saveProfile: (linkId, profile) => ipc.invoke(IPC.orchestrationProfileSave, linkId, profile),

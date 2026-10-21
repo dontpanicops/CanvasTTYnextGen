@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dontpanicops/raoden-loom/blob/main/docs/board-tasks-v1.schema.json",
+  "title": "Raoden Loom board tasks v1",
+  "description": "A tasks file for the task board (format board-tasks/v1). Lengths count Unicode characters; the import counts UTF-16 units, so a file that passes the schema can still have a row refused. Which Loom version accepts which field: docs/agent-orchestration/board-formats.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "tasks"],
+  "oneOf": [
+    { "required": ["workspaceId"] },
+    { "required": ["workspace"] }
+  ],
+  "properties": {
+    "format": { "const": "board-tasks/v1" },
+    "workspaceId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$", "maxLength": 64 },
+    "workspace": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "source": { "type": "string", "maxLength": 300 },
+    "tasks": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "$ref": "#/$defs/task" } }
+  },
+  "$defs": {
+    "ref": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,31}$", "maxLength": 32 },
+    "model": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/\\[\\]-]{0,127}$", "maxLength": 128 },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "project", "title", "text"],
+      "if": { "required": ["external"] },
+      "then": {},
+      "else": { "required": ["criteria"] },
+      "properties": {
+        "ref": { "$ref": "#/$defs/ref" },
+        "project": { "type": "string", "pattern": "^/", "maxLength": 4096 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "criteria": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+        "dependsOn": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/ref" } },
+        "ifAbsent": { "const": true },
+        "external": { "const": true },
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "lead": { "$ref": "#/$defs/model" },
+            "executor": { "$ref": "#/$defs/model" },
+            "reviewer": { "$ref": "#/$defs/model" }
+          }
+        },
+        "issue": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", "maxLength": 64 },
+        "commitTitle": { "type": "string", "minLength": 1, "maxLength": 72, "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]+$" },
+        "scope": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 300 } }
+      }
+    }
+  }
+}

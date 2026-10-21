@@ -1196,6 +1196,12 @@ export const IPC = {
   orchestrationBoardMergeOpen: "orchestration:board-merge-open",
   orchestrationBoardHead: "orchestration:board-head",
   orchestrationBoardQueue: "orchestration:board-queue",
+  // F1 (stage-f-external-projects.md §5.6): «Import tasks» (main opens the file dialog and reads the file), «Import» and
+  // «Reject» of a file in inbox/; the event main → window when inbox/ changed (not an invoke channel)
+  orchestrationBoardImportFile: "orchestration:board-import-file",
+  orchestrationBoardInboxImport: "orchestration:board-inbox-import",
+  orchestrationBoardInboxReject: "orchestration:board-inbox-reject",
+  orchestrationBoardEvent: "orchestration:board-event",
   orchestrationReadiness: "orchestration:readiness",
   orchestrationProfileGet: "orchestration:profile-get",
   orchestrationProfileSave: "orchestration:profile-save",

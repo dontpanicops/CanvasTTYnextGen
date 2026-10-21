@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dontpanicops/raoden-loom/blob/main/docs/board-review-v1.schema.json",
+  "title": "Raoden Loom board review v1",
+  "description": "The review export of a finished board task run (format board-review/v1). Every listed field is always present; \"no value\" is null or an empty array where the field allows it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "run", "task", "commit", "tree", "checkedTree", "base", "branch", "push", "lead", "executor", "reviewer", "conditions", "findings", "openBlocking", "scope"],
+  "properties": {
+    "format": { "const": "board-review/v1" },
+    "run": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "maxLength": 36 },
+    "task": { "$ref": "#/$defs/task" },
+    "commit": { "$ref": "#/$defs/sha" },
+    "tree": { "$ref": "#/$defs/sha" },
+    "checkedTree": { "$ref": "#/$defs/sha" },
+    "base": { "$ref": "#/$defs/base" },
+    "branch": { "$ref": "#/$defs/gitName" },
+    "push": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/push" }] },
+    "lead": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/role" }] },
+    "executor": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/role" }] },
+    "reviewer": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/role" }] },
+    "conditions": { "type": "array", "items": { "$ref": "#/$defs/condition" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "openBlocking": { "type": "integer", "minimum": 0 },
+    "scope": {
+      "type": ["array", "null"],
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$", "maxLength": 64 },
+    "gitName": { "type": "string", "pattern": "^(?!-)[A-Za-z0-9._/-]{1,200}$", "maxLength": 200 },
+    "at": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$", "maxLength": 24 },
+    "model": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/\\[\\]-]{0,127}$", "maxLength": 128 },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "ref", "title", "issue"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^T-\\d{1,6}$", "maxLength": 8 },
+        "ref": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,31}$", "maxLength": 32 },
+        "title": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+        "issue": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", "maxLength": 64 }
+      }
+    },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch", "commit"],
+      "properties": {
+        "branch": { "type": "string", "pattern": "^[A-Za-z0-9._/-]{1,200}$", "maxLength": 200 },
+        "commit": { "$ref": "#/$defs/sha" }
+      }
+    },
+    "push": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["remote", "at", "result"],
+      "properties": {
+        "remote": { "$ref": "#/$defs/gitName" },
+        "at": { "$ref": "#/$defs/at" },
+        "result": { "const": "confirmed" }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "cli", "model", "modelActual", "cliVersionAtExport", "cliVersionRaw"],
+      "properties": {
+        "provider": { "enum": ["claude", "codex"] },
+        "cli": { "enum": ["claude", "codex"] },
+        "model": { "$ref": "#/$defs/model" },
+        "modelActual": { "$ref": "#/$defs/model" },
+        "cliVersionAtExport": { "type": ["string", "null"], "pattern": "^\\d+\\.\\d+\\.\\d+([-+][0-9A-Za-z.-]+)?$", "maxLength": 128 },
+        "cliVersionRaw": { "type": ["string", "null"], "maxLength": 128 }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "covers", "stage", "status", "stale", "evidence"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^C[0-9]{1,6}$", "maxLength": 16 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "covers": { "type": "array", "maxItems": 32, "items": { "type": "string", "pattern": "^R[0-9]{1,6}$", "maxLength": 16 } },
+        "stage": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["met", "not_met", "not_checked", "dropped"] },
+        "stale": { "type": "boolean" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "check", "command"],
+      "properties": {
+        "kind": { "enum": ["check", "change", "person"] },
+        "check": { "type": ["string", "null"] },
+        "command": { "type": ["string", "null"] }
+      },
+      "if": { "properties": { "kind": { "const": "check" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "check": { "type": "string", "pattern": "^cmd-[0-9]{1,2}$", "maxLength": 16 },
+          "command": { "type": ["string", "null"], "minLength": 1, "maxLength": 1000 }
+        }
+      },
+      "else": {
+        "properties": { "check": { "type": "null" }, "command": { "type": "null" } }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "status", "closedBy", "downgraded", "problem", "evidence", "closeWhen", "paths"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^F[0-9]{1,6}$", "maxLength": 16 },
+        "severity": { "enum": ["blocking", "wish"] },
+        "status": { "enum": ["open", "closed"] },
+        "closedBy": { "enum": ["reviewer", "person", null] },
+        "downgraded": { "type": "boolean" },
+        "problem": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "evidence": { "type": "string", "maxLength": 2000 },
+        "closeWhen": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "paths": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 } }
+      },
+      "if": { "properties": { "status": { "const": "open" } }, "required": ["status"] },
+      "then": { "properties": { "closedBy": { "type": "null" } } },
+      "else": { "properties": { "closedBy": { "type": "string" } } }
+    }
+  }
+}

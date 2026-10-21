@@ -79,7 +79,7 @@ export interface GoalInput {
   // are asked for in it. Absent (an older goal): no language is asked for.
   language?: "ru" | "en";
   // B1, journal v2 only: the board task this run works on (journal-v2-format.md §2.10)
-  task?: { id: string; key: string };
+  task?: { id: string; key: string; ref?: string }; // ref (F1, T-12): the external id, set by main from the board
   // B4 (owner's decision 11), journal v2 and a separate copy only: the copy starts from this commit — the result branch
   // of the task `key` this run's task depends on — instead of the project's working folder
   base?: { branch: string; commit: string; key: string };
@@ -626,14 +626,17 @@ function checkBase(b: unknown, v2: boolean, workMode: GoalInput["workMode"], bad
 }
 
 // B1: a board task in the goal — journal v2 only, like models (a v1 goal is read by 1.5.7 without a schema)
+// F1 (T-12): the external task id in the role line
+const TASK_REF = /^[A-Za-z0-9][A-Za-z0-9-]{0,31}$/;
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-function checkTask(t: unknown, v2: boolean, bad: (m: string) => never): { id: string; key: string } {
+function checkTask(t: unknown, v2: boolean, bad: (m: string) => never): { id: string; key: string; ref?: string } {
   const o = t as Record<string, unknown> | null;
-  if (!o || typeof o !== "object" || Array.isArray(o) || Object.keys(o).some((k) => k !== "id" && k !== "key")) bad("task must be { id, key }");
+  if (!o || typeof o !== "object" || Array.isArray(o) || Object.keys(o).some((k) => k !== "id" && k !== "key" && k !== "ref")) bad("task must be { id, key, ref? }");
   if (typeof o!.id !== "string" || !TASK_ID.test(o!.id)) bad("task.id must be a UUID");
   if (typeof o!.key !== "string" || !/^T-\d{1,6}$/.test(o!.key)) bad("task.key must be T-<n>");
+  if (o!.ref !== undefined && (typeof o!.ref !== "string" || !TASK_REF.test(o!.ref))) bad("task.ref must match [A-Za-z0-9][A-Za-z0-9-]{0,31}");
   if (!v2) bad("task: a board task is recorded only in a journal v2 goal");
-  return { id: o!.id as string, key: o!.key as string };
+  return { id: o!.id as string, key: o!.key as string, ...(o!.ref !== undefined ? { ref: o!.ref as string } : {}) };
 }
 
 function checkModels(m: GoalInput["models"], v2: boolean, bad: (m: string) => never): Partial<Record<AgentRole, string>> | undefined {
@@ -2145,6 +2148,11 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
 
   // ---------- tasks ----------
 
+  // F1 (T-12): the first line of every role's task, for the project to recognise a Raoden Loom task. Not in goal.text.
+  function roleLine(role: "lead" | "executor" | "reviewer"): string {
+    return `[Raoden Loom] role: ${role}; task: ${goal.task?.ref ?? goal.task?.key ?? goal.decomposition?.key ?? goal.resolution?.key ?? "-"}`;
+  }
+
   async function buildTask(action: Extract<Action, { kind: "turn" }>, snapshot: Snapshot): Promise<string> {
     await loadFindings();
     const st = state();
@@ -2152,8 +2160,9 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
     // A3 (5h §3.2): the reviewer gets no executor's report or task and no lead's conversation
     const reviewer = action.purpose !== "plan" && action.purpose !== "execute" && action.purpose !== "decompose" && byReviewer(st);
     if (action.purpose === "decompose") return splitTask(st, text);
+    const role = action.purpose === "execute" ? "executor" : reviewer ? "reviewer" : "lead";
     const parts: string[] = [
-      `Role: ${action.purpose === "execute" ? "executor" : reviewer ? "reviewer" : "lead"}. Purpose: ${action.purpose}.`,
+      `${roleLine(role)}\nRole: ${role}. Purpose: ${action.purpose}.`,
       ...(goal.language ? [languageLine(goal.language)] : []),
       `Goal:\n${goal.text}`,
       `Acceptance criteria (fixed; you cannot change them):\n${goal.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
@@ -2241,7 +2250,7 @@ function controller(deps: OrchestrationDeps, clock: () => number, writer: RunWri
     const limits = effectiveLimits(goal, st);
     const used = Object.keys(st.turns).length;
     const parts = [
-      "Role: lead. Purpose: decompose.",
+      `${roleLine("lead")}\nRole: lead. Purpose: decompose.`,
       ...(goal.language ? [languageLine(goal.language)] : []),
       `Goal:\n${goal.text}`,
       `Requirements (R<n> is acceptance criterion n, fixed):\n${goal.criteria.map((c, i) => `R${i + 1}: ${c}`).join("\n")}`,

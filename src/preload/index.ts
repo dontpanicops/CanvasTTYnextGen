@@ -36,8 +36,8 @@ function subscribe<T>(channel: string, listener: (event: T) => void): () => void
 
 const orchestration = createOrchestrationClient({
   invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
-  on: (channel, listener) => { ipcRenderer.on(channel, (_event, payload) => listener(payload)); }
-}, process.platform);
+  on: (channel, listener) => { ipcRenderer.on(channel, (_event, payload) => listener(payload as never)); }
+}, process.platform, process.arch);
 
 const api: CanvasTTYApi = {
   orchestration,

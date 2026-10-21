@@ -164,8 +164,9 @@ test("renderer: orchestration entry points inactive with the hint where it is un
   assert.equal(off.disabled, true);
   assert.equal(t("en", off.hint), "Orchestration is currently available on macOS only");
   assert.equal(t("ru", off.hint), "Оркестрация пока доступна только на macOS");
-  assert.equal(t("en", "orchError_unsupported_platform"), "Orchestration is currently available on macOS only", "main's refusal reads the same");
-  assert.equal(t("ru", "orchError_unsupported_platform"), "Оркестрация пока доступна только на macOS");
+  // F1 (stage-f-external-projects.md §10): main's refusal also names the new inputs' Apple silicon
+  assert.equal(t("en", "orchError_unsupported_platform"), "Orchestration is available on macOS only; task import and external-task marks need Apple silicon (arm64)");
+  assert.equal(t("ru", "orchError_unsupported_platform"), "Оркестрация доступна только на macOS; импорт задач и отметки внешних задач — только на Apple silicon (arm64)");
   for (const a of ["resume", "step", "answer", "clarify", "raise_limit", "recover", "permission", "pause", "keep_running"]) {
     assert.equal(actionEnabled(a, false), false, a);
     assert.equal(actionEnabled(a, true), true, a);
