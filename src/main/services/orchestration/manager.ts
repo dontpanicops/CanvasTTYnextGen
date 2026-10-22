@@ -30,10 +30,11 @@ import { accessMapping } from "./access.ts";
 import { claudeInit, clisItem, codexSchema, createCapabilityCache, probeClaude as probeClaudeCaps, probeCodex as probeCodexCaps, startProblems, startWarnings } from "./capabilities.ts";
 import type { Capabilities } from "./capabilities.ts";
 import type { AgentAccess } from "./access.ts";
-import { commitMessage } from "./finish.ts";
+import { commitMessage, fetchUrlsMatch } from "./finish.ts";
+import { runShell, shq } from "./shellRun.ts";
 import { laravelTestDb, neededSteps, worktreeSteps } from "./prepare.ts";
 import { codexModels, probeClaude, probeCodex } from "./probe.ts";
-import { createProfileStore, currentBranch, gitRemotes, suggestProfile, validateProfile } from "./profile.ts";
+import { createProfileStore, currentBranch, fillBranch, gitNameOk, gitRemotes, PROBE_FIELDS, suggestProfile, templateNeedsIssue, validateProfile } from "./profile.ts";
 import { parseCliVersion } from "./providers.ts";
 import type { AgentAdapter } from "./agents.ts";
 import { checkPreparedDeps, createRegistry } from "./checks.ts";
@@ -57,11 +58,11 @@ import { fileRefusal, importReport, readImportFile, readTasksFile, sha256 } from
 import { createInbox, inboxNameOk } from "./boardInbox.ts";
 import type { SplitTask, TaskInput } from "./boardStore.ts";
 import { boardStatuses, heldDeps, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, WAIT_PAUSES, type BoardHead } from "../../../shared/taskBoard.ts";
-import { AUTOPILOT_BUDGET, baseOf, type AutopilotBudget, type Board, type BoardPlace, type BoardTask, type BoardView, type ImportReport, type RunTaskFacts } from "../../../shared/taskBoard.ts";
+import { AUTOPILOT_BUDGET, baseOf, placeKey, type AutopilotBudget, type Board, type BoardOpts, type BoardPlace, type BoardTask, type BoardView, type ImportReport, type RunTaskFacts } from "../../../shared/taskBoard.ts";
 import type { OrchestrationRunView, OrchestrationTurnPurpose, OrchestrationWorkMode } from "../../../shared/orchestration.ts";
 import { viewCause } from "../../../shared/orchestrationPause.ts";
 import { runOwners, workspaceOf } from "../../../shared/workspaceOwnership.ts";
-import { createBoardAutopilot } from "./boardAutopilot.ts";
+import { createBoardAutopilot, placeOptsOf } from "./boardAutopilot.ts";
 import { COMMON_WORKSPACE_ID } from "../../../shared/contracts.ts";
 import { newInputsAvailable, orchestrationAvailable } from "../../../shared/orchestration.ts";
 import type {
@@ -123,6 +124,8 @@ export interface RunManagerDeps {
   workspaceNamed?(title: string): string[];
   // the Claude capability probe's waits: the first, and the one retry in the background (default 30 s and 90 s)
   claudeProbeMs?: { first: number; retry: number };
+  remoteCheckMs?: number; // F3 (T-6): the wait of `git ls-remote` for the branch names on the remote (20 s; tests only)
+  baseFetchMs?: number; // F3 (T-13b, О3): the wait of the remote base's `git fetch` (120 s; tests only)
   appVersion?(): string; // written down when a newer version's link is let go
   // The machine's platform (process.platform by default). Where orchestrationAvailable() is false nothing new is
   // linked, started or continued; existing runs are read, stopped and unlinked. Engine tests on Linux pass "darwin".
@@ -207,7 +210,34 @@ export function createRunManager(deps: RunManagerDeps) {
   });
   const activityLog = createActivityLog(deps.root); // reads nothing until asked
   const profiles = createProfileStore(deps.root); // reads nothing until asked
+  // F3 (T-13a): the options of the places of these tasks from their projects' saved profiles — every reading of the
+  // statuses in main takes them, as the window and the autopilot do (principle 8)
+  async function optsOf(tasks: readonly Pick<BoardTask, "workspaceId" | "project">[]): Promise<BoardOpts & { remoteBase: Set<string>; issueRequired: Set<string> }> {
+    const remoteBase = new Set<string>();
+    const issueRequired = new Set<string>();
+    const kept = new Map<string, OrchestrationProjectProfile | null>();
+    for (const t of tasks) {
+      if (!kept.has(t.project)) kept.set(t.project, await profiles.get(t.project).catch(() => null));
+      const o = placeOptsOf(kept.get(t.project) ?? {});
+      if (o.remoteBase) remoteBase.add(placeKey(t));
+      if (o.issueRequired) issueRequired.add(placeKey(t));
+    }
+    return { remoteBase, issueRequired };
+  }
   const direnvOf = async (project: string) => ({ direnv: (await profiles.get(project))?.env.direnv ?? true });
+  // F3 (T-6, T-13a/b): git's environment for the remote base's address and branches — the user's login shell's, the same
+  // when the profile is saved and when a start checks it (direnv: the profile's being saved), no password prompt
+  const loginGitEnv = async (project: string, direnv?: boolean): Promise<NodeJS.ProcessEnv> => ({
+    ...(deps.native ? (await deps.native(project, direnv === undefined ? await direnvOf(project) : { direnv }).catch(() => null))?.env ?? process.env : process.env),
+    GIT_TERMINAL_PROMPT: "0"
+  });
+  // F3: execFile's timeout kills git, not the ssh it runs: ssh asks nothing, gives up connecting in 15 s and drops a silent
+  // server in 30 s. A user's own GIT_SSH_COMMAND, GIT_SSH or core.sshCommand is left as it is
+  async function sshEnv<E extends NodeJS.ProcessEnv>(project: string, env: E): Promise<E> {
+    if (env.GIT_SSH_COMMAND || env.GIT_SSH) return env;
+    const own = await run(deps.gitPath(), ["config", "--get", "core.sshCommand"], { cwd: project, env, timeout: 10_000 }).then((r) => r.stdout.trim(), () => "");
+    return own ? env : { ...env, GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2" };
+  }
   const runtimes = new Map<string, { at: number; value: Parameters<typeof assessReadiness>[0]["runtime"] & { claudeHelp?: () => Promise<string> } }>();
   // What the installed CLIs can do, probed once per program, version and modification time (capabilities.ts): the
   // same answer for the readiness and the start, never a list of versions.
@@ -285,6 +315,8 @@ export function createRunManager(deps: RunManagerDeps) {
       const rt = await deps.native!(project, await direnvOf(project));
       return { shell: rt.shell, env: rt.env };
     },
+    // F3 (T-13c): a project with a remote base has no board's result (remote_base_mode)
+    remoteBase: async (project) => !!(await profiles.get(project).catch(() => null))?.runBase,
     // ponytail: no run held here is in a turn — of any project
     quiet: async () => ![...handles.values()].some((h) => h.view().active?.kind === "turn")
   });
@@ -586,7 +618,11 @@ export function createRunManager(deps: RunManagerDeps) {
       await activityLog.open(runId);
       const workMode = req.goal.workMode ?? (req.goal.mode ? (await profiles.get(source))?.workMode ?? "project" : undefined);
       const { svc, rt } = await serviceWith(source, native, workMode === "worktree" ? "pending" : null);
-      const { prepareAuto, ...goal } = await resolveGoal(source, runId, await withBoardRef(req.goal, inQueue), rt);
+      const t = await boardTaskOf(req.goal, inQueue);
+      // F3 (T-6): the worktree's branch of a board task's run — chosen here, outside the request's identity
+      const branch = await branchFor(source, runId, req.goal, workMode, t);
+      const { branch: _given, ...named } = await withBoardRef(req.goal, inQueue) as OrchestrationGoalInput & { branch?: unknown };
+      const { prepareAuto, ...goal } = await resolveGoal(source, runId, { ...named, ...(branch ? { branch } : {}) }, rt, t);
       own(await svc.createRun({ source, goal, runId, requestKey: key, prepareAuto }));
       if (rt) runRuntimes.set(runId, rt);
       return { runId, created: true };
@@ -609,6 +645,61 @@ export function createRunManager(deps: RunManagerDeps) {
   }
   // F1 (T-12): the task's external id comes from the board only: a ref in the goal is dropped (parseGoal refuses it from
   // the window), the board task's ref is put in
+  async function boardTaskOf(g: OrchestrationGoalInput, inQueue?: OrchestrationCanvas): Promise<BoardTask | undefined> {
+    if (!g.task || typeof g.task !== "object") return undefined;
+    return (inQueue ? await board.peek() : await board.read()).board.tasks.find((x) => x.id === g.task!.id);
+  }
+  // F3 (T-6, §7.2): the branch of a board task's worktree run. With the profile's branchTemplate: its name for the task
+  // ({ref} of a task without one: its key; {issue} missing — branch_template_field), checked as git takes a branch
+  // (branch_invalid), never a protected one (protected_branch: main, master, the remote base's branch — F4 adds the
+  // profile's list), the first free of <name>, <name>-2 … -9 locally and among the names startOn found taken on the
+  // remote (branch_taken). With a remote base and no template: canvastty/<run8>, the name the worktree gets anyway (the
+  // branch of the review export always has a source). Any other run: none (canvastty/<run8>, as before)
+  const remoteTaken = new Map<string, ReadonlySet<string>>(); // requestId → the names startOn found on the remote, for the start in hand only
+  async function branchFor(source: string, runId: string, g: OrchestrationGoalInput, workMode: string | undefined, t: BoardTask | undefined): Promise<string | null> {
+    if (!g.task || !t || workMode !== "worktree") return null;
+    const profile = await profiles.get(source);
+    if (!profile?.branchTemplate) return profile?.runBase ? `canvastty/${runId.slice(0, 8)}` : null;
+    if (templateNeedsIssue(profile.branchTemplate) && !t.issue) refuse("branch_template_field", `${t.key} has no issue for the branch template`);
+    const name = fillBranch(profile.branchTemplate, { issue: t.issue ?? "", ref: t.ref ?? t.key, run8: runId.slice(0, 8) });
+    if (!(await branchNameValid(source, name))) refuse("branch_invalid", `the branch name is not valid for git: ${name}`);
+    // every candidate, without case (APFS: main and Main are one file of refs)
+    const guarded = new Set(protectedBranches(profile).map((x) => x.toLowerCase()));
+    if (guarded.has(name.toLowerCase())) refuse("protected_branch", `the branch name is protected: ${name}`);
+    const onRemote = remoteTaken.get(runId) ?? new Set<string>();
+    for (const c of branchCandidates(name)) {
+      if (onRemote.has(c) || guarded.has(c.toLowerCase())) continue;
+      const local = await run(deps.gitPath(), ["show-ref", "--verify", "--quiet", `refs/heads/${c}`], { cwd: source, timeout: 10_000 }).then(() => true, () => false);
+      if (!local) return c;
+    }
+    return refuse("branch_taken", `the branch name ${name} is taken (every variant up to -9)`);
+  }
+  const branchCandidates = (name: string): string[] => [name, ...[2, 3, 4, 5, 6, 7, 8, 9].map((k) => `${name}-${k}`)];
+  // F3: the built-in protected names only (F4, T-8: the profile's runPush.protected[] too)
+  const protectedBranches = (p: OrchestrationProjectProfile): string[] => ["main", "master", ...(p.runBase ? [p.runBase.branch] : [])];
+  const branchNameValid = async (source: string, name: string): Promise<boolean> =>
+    gitNameOk(name) && await run(deps.gitPath(), ["check-ref-format", "--branch", name], { cwd: source, timeout: 10_000 }).then(() => true, () => false);
+  // F3 (T-6, С2.2): before the canvas lock — the names of a board task's template branch already on the remote base's
+  // remote (one `git ls-remote` of the full refs, 20 s, no password prompt), its fetch addresses checked first (every one
+  // the profile's remoteUrl; pushurl is not the base's: fetchUrlsMatch). Not asked for a repeat of a created run
+  async function remoteBranchesTaken(input: { requestId: string; goal: OrchestrationGoalInput }, project: string): Promise<ReadonlySet<string> | null> {
+    if (!input.goal?.task || await exists(input.requestId)) return null;
+    const profile = await profiles.get(project);
+    const mode = input.goal.workMode ?? (input.goal.mode ? profile?.workMode : undefined);
+    if (!profile?.branchTemplate || !profile.runBase || mode !== "worktree") return null;
+    const t = (await board.read()).board.tasks.find((x) => x.id === input.goal.task!.id);
+    if (!t || (templateNeedsIssue(profile.branchTemplate) && !t.issue)) return null; // the creation refuses it
+    const name = fillBranch(profile.branchTemplate, { issue: t.issue ?? "", ref: t.ref ?? t.key, run8: input.requestId.slice(0, 8) });
+    const { remote, remoteUrl } = profile.runBase;
+    const env = await loginGitEnv(project);
+    const urls = await run(deps.gitPath(), ["remote", "get-url", "--all", remote], { cwd: project, env, timeout: 10_000 }).then((r) => r.stdout, () => null);
+    if (urls === null) refuse("remote_url_unreadable", `the address could not be read of the remote: ${remote}`);
+    if (!remoteUrl || !fetchUrlsMatch(urls, remoteUrl)) refuse("base_remote_mismatch", `the address is not the allowed one (save the project settings again) of the remote: ${remote}`);
+    const refs = branchCandidates(name).map((c) => `refs/heads/${c}`);
+    const out = await run(deps.gitPath(), ["ls-remote", remote, ...refs], { cwd: project, env: await sshEnv(project, env), timeout: deps.remoteCheckMs ?? 20_000, maxBuffer: 1 << 20 })
+      .then((r) => r.stdout, (e: unknown) => refuse("remote_check_failed", `git ls-remote failed or did not answer (${String((e as Error)?.message ?? e).slice(0, 200)}) on the remote: ${remote}`));
+    return new Set(out.split(/\r?\n/).map((l) => /^[0-9a-f]{40,64}\s+refs\/heads\/(.+)$/.exec(l.trim())?.[1]).filter((x): x is string => !!x));
+  }
   async function withBoardRef(g: OrchestrationGoalInput, inQueue?: OrchestrationCanvas): Promise<OrchestrationGoalInput> {
     if (!g.task || typeof g.task !== "object") return g; // not a task: checkTask refuses it
     const t = (inQueue ? await board.peek() : await board.read()).board.tasks.find((x) => x.id === g.task!.id);
@@ -616,7 +707,8 @@ export function createRunManager(deps: RunManagerDeps) {
     return { ...g, task: { ...task, ...(t?.ref ? { ref: t.ref } : {}) } };
   }
 
-  async function resolveGoal(source: string, runId: string, g: OrchestrationGoalInput, rt: NativeRuntime | null): Promise<GoalInput & { prepareAuto?: boolean }> {
+  // t (F3, T-7): the board task of the goal — its commitTitle is the commit's title
+  async function resolveGoal(source: string, runId: string, g: OrchestrationGoalInput & { branch?: string }, rt: NativeRuntime | null, t?: BoardTask): Promise<GoalInput & { prepareAuto?: boolean }> {
     const { mode, finish, models: over, accessOverride: _override, ...given } = g;
     const chosen = roleModels(await profiles.get(source), over);
     const models = Object.fromEntries(Object.entries(chosen).filter(([, m]) => m !== null)) as Partial<Record<keyof OrchestrationRoleModels, string>>;
@@ -661,12 +753,42 @@ export function createRunManager(deps: RunManagerDeps) {
       access,
       ...(any ? {
         finish: {
-          commit: finish!.commit || finish!.push ? { message: commitMessage(g.text, runId) } : null,
+          commit: finish!.commit || finish!.push ? { message: commitMessage(g.text, runId, t?.commitTitle) } : null,
           push: finish!.push ? profile.finish.push : null,
           qa: finish!.qa ? profile.finish.qa : null
         }
       } : {})
     };
+  }
+
+  // F3 (T-13a, C3.13): the one fetch address of a remote, `git remote get-url --all` (insteadOf expanded; pushurl is not
+  // the base's) in the login shell's environment, as the start reads it; none, or several different — remote_url_unreadable
+  async function fetchUrlOf(project: string, remote: string, direnv: boolean): Promise<string> {
+    const out = await run(deps.gitPath(), ["remote", "get-url", "--all", remote], { cwd: project, env: await loginGitEnv(project, direnv), timeout: 10_000 }).then((r) => r.stdout, () => null);
+    const urls = [...new Set((out ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean))];
+    if (urls.length !== 1) refuse("remote_url_unreadable", `the address could not be read (${urls.length ? "several addresses" : "none"}) of the remote: ${remote}`);
+    return urls[0]!;
+  }
+  // F3 (T-13b, §7.2, О3): the autopilot's base at the profile's runBase — the remote's fetch addresses, every one the
+  // profile's remoteUrl (pushurl is not the base's: fetchUrlsMatch); the branch fetched by an explicit refspec as a line
+  // of the user's login shell, no password prompt, 120 s; the commit it names now
+  const remoteTrack = (rb: { remote: string; branch: string }) => `refs/remotes/${rb.remote}/${rb.branch}`;
+  const trackCommit = (project: string, rb: { remote: string; branch: string }): Promise<string | null> =>
+    run(deps.gitPath(), ["rev-parse", "--verify", "--quiet", `${remoteTrack(rb)}^{commit}`], { cwd: project, timeout: 10_000 }).then((r) => r.stdout.trim() || null, () => null);
+  async function remoteBase(project: string): Promise<{ branch: string; commit: string; key: string }> {
+    const rb = (await profiles.get(project))?.runBase ?? refuse("invalid_base", "the project settings have no remote base");
+    if (!deps.native) refuse("base_fetch_failed", "no login shell to fetch the remote branch in");
+    const rt = await deps.native!(project, await direnvOf(project));
+    const env = await sshEnv(project, { ...rt.env, GIT_TERMINAL_PROMPT: "0" });
+    const urls = await run(deps.gitPath(), ["remote", "get-url", "--all", rb.remote], { cwd: project, env, timeout: 10_000 }).then((r) => r.stdout, () => null);
+    if (urls === null) refuse("remote_url_unreadable", `the address could not be read of the remote: ${rb.remote}`);
+    if (!rb.remoteUrl || !fetchUrlsMatch(urls, rb.remoteUrl)) refuse("base_remote_mismatch", `the address is not the allowed one (save the project settings again) of the remote: ${rb.remote}`);
+    const line = `GIT_TERMINAL_PROMPT=0 git fetch --no-tags ${shq(rb.remote)} ${shq(`+refs/heads/${rb.branch}:${remoteTrack(rb)}`)}`;
+    const f = await runShell({ shell: rt.shell, line, cwd: project, env, launch: deps.launch(), timeoutMs: deps.baseFetchMs ?? 120_000, maxOutputBytes: 16_384 }).result;
+    if (f.stopCause === "timeout") refuse("base_fetch_failed", `git fetch did not answer in ${Math.round((deps.baseFetchMs ?? 120_000) / 1000)} s`);
+    if (f.exitCode !== 0 || f.signal || f.spawnError) refuse("base_fetch_failed", `git fetch failed: ${(f.spawnError ?? f.output.tail.trim()) || `exit ${f.exitCode ?? f.signal}`}`.slice(0, 300));
+    const commit = await trackCommit(project, rb) ?? refuse("base_fetch_failed", `no commit of ${rb.remote}/${rb.branch} after the fetch`);
+    return { branch: `${rb.remote}/${rb.branch}`, commit, key: "remote" };
   }
 
   async function leadProject(linkId: string): Promise<string> {
@@ -704,10 +826,16 @@ export function createRunManager(deps: RunManagerDeps) {
     if (ws.mode === "project") refuse("take_unavailable", "the changes are in the project folder already");
     const cps = Object.keys(st.workspace!.checkpoints).map(Number).sort((a, b) => a - b);
     const stage = cps.at(-1) ?? null;
-    const tree = stage !== null ? st.workspace!.checkpoints[String(stage)].tree : await snapshotCopyTree(ws, st.workspace!.baseline.tree);
+    const goalJson = await readText(deps.root, runId, st.goal).then((b) => JSON.parse(b.toString("utf8")) as { text?: unknown; base?: unknown; branch?: unknown }, () => ({} as { text?: unknown; base?: unknown; branch?: unknown }));
+    // F3 (T-6): a worktree named by the profile's template keeps its name, and takes the tree of the run's commit (not of
+    // the checked snapshot, which holds what the preparation made): its branch holds that commit — no commit is added
+    const named = ws.mode === "worktree" && typeof goalJson.branch === "string";
+    const committed = named ? st.orch.finish.filter((f) => f.step === "commit" && f.status === "done" && f.commit).at(-1)?.commit ?? null : null;
+    const commitTree = committed ? await run(deps.gitPath(), ["rev-parse", `${committed}^{tree}`], { cwd: ws.sourcePath, timeout: 10_000 }).then((r) => r.stdout.trim(), () => null) : null;
+    const tree = commitTree && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(commitTree) ? commitTree
+      : stage !== null ? st.workspace!.checkpoints[String(stage)].tree : await snapshotCopyTree(ws, st.workspace!.baseline.tree);
     const files = (await diffTreeNames(ws, st.workspace!.baseline.tree, tree)).files.length;
     const taken = await readTaken(ws);
-    const goalJson = await readText(deps.root, runId, st.goal).then((b) => JSON.parse(b.toString("utf8")) as { text?: unknown; base?: unknown }, () => ({} as { text?: unknown; base?: unknown }));
     const goalText = String(goalJson.text ?? "");
     const fromBranch = !!goalJson.base; // B4: a copy started from a dependency's branch
     const runBranch = ws.mode === "worktree" ? taken?.branch?.name ?? ws.branch : null;
@@ -718,7 +846,7 @@ export function createRunManager(deps: RunManagerDeps) {
       mode: ws.mode as "copy" | "worktree", from: stage !== null ? "checkpoint" : "current", stage, files,
       // a completed run without changes is taken too (review of B4): its branch is the next task's base, else the chain stops
       allowed: ["completed", "stopped", "paused"].includes(view.status) && !view.newer && (files > 0 || view.status === "completed"),
-      suggested: taken?.branch && ws.mode === "worktree" ? taken.branch.name : suggested, runBranch,
+      suggested: taken?.branch && ws.mode === "worktree" ? taken.branch.name : named ? runBranch! : suggested, runBranch,
       branch: taken?.branch && taken.branch.tree === tree ? { name: taken.branch.name, at: taken.branch.at } : null,
       applied: taken?.applied && taken.applied.tree === tree ? { at: taken.applied.at } : null
     };
@@ -913,8 +1041,10 @@ export function createRunManager(deps: RunManagerDeps) {
     }
     const facts = await taskFacts();
     if (splitsPending(r.board, facts).length) watchDecompositions(); // E2: also after a restart (§3.4)
+    const opts = await optsOf(r.board.tasks);
     return { board: r.board, readOnly: r.readOnly, facts: facts.filter((f) => f.taskId || f.taskKey || f.decompositionOf), autopilot: await autopilot.state(),
-      ...(heads.length ? { heads } : {}), ...(queued.length ? { queued } : {}), ...(inbox.rows().length ? { inbox: inbox.rows() } : {}) };
+      ...(heads.length ? { heads } : {}), ...(queued.length ? { queued } : {}), ...(inbox.rows().length ? { inbox: inbox.rows() } : {}),
+      ...(opts.remoteBase.size ? { remoteBase: [...opts.remoteBase] } : {}), ...(opts.issueRequired.size ? { issueRequired: [...opts.issueRequired] } : {}) };
   }
   // C1 (§4.5): «Объединить» — a task «Done» in a separate copy into its place's head (started if it has none); its result
   // branch is made first, if it has none (the same as decision 8)
@@ -923,7 +1053,9 @@ export function createRunManager(deps: RunManagerDeps) {
     platformOk();
     const { board: b } = await board.read();
     const t = b.tasks.find((x) => x.id === taskId) ?? refuse("task_not_found", `no task ${taskId}`);
-    const st = boardStatuses(b, await taskFacts()).get(t.id)!;
+    const opts = await optsOf(b.tasks);
+    remoteBaseOff(opts, t);
+    const st = boardStatuses(b, await taskFacts(), [], opts).get(t.id)!;
     if (!st.done || !st.current) refuse("merge_unavailable", `${t.key} is not «Done»`);
     let run = (await taskFacts()).find((f) => f.runId === st.current);
     if (!isCopy(run?.workMode)) refuse("merge_unavailable", "only a result of a separate copy or a worktree is merged");
@@ -936,6 +1068,10 @@ export function createRunManager(deps: RunManagerDeps) {
     await merges.ensureHead(t.workspaceId, t.project);
     return merges.merge({ workspaceId: t.workspaceId, project: t.project, task: { id: t.id, key: t.key }, taskRunId: run!.runId, commit: run!.taken!.commit!, language });
   }
+  // F3 (T-13c): a place at a remote base has no board's result — no merge, no head, no split (remote_base_mode)
+  const remoteBaseOff = (opts: BoardOpts, at: { workspaceId: string; project: string }): void => {
+    if (opts.remoteBase?.has(placeKey(at))) refuse("remote_base_mode", "the project's base is a remote branch: no board's result, merge or split here");
+  };
   // a place of the board: a project folder some task of the board names (realpath), never any path
   async function placeProject(project: string): Promise<string> {
     const real = await realpath(project).catch(() => refuse("invalid_argument", "no such project folder"));
@@ -946,10 +1082,11 @@ export function createRunManager(deps: RunManagerDeps) {
   // background, the oldest first; a merge that does not complete (conflict, checks) ends the series
   async function mergeAll(workspaceId: string, project: string, language: "ru" | "en"): Promise<{ tasks: string[] }> {
     notOpen();
+    remoteBaseOff(await optsOf([{ workspaceId, project }]), { workspaceId, project });
     const h = await merges.head(workspaceId, project) ?? refuse("no_head", "the board has no merged head");
     const { board: b } = await board.read();
     const facts = await taskFacts();
-    const statuses = boardStatuses(b, facts);
+    const statuses = boardStatuses(b, facts, [], await optsOf(b.tasks));
     const into = await merges.mergesInto(h.ref, project);
     const todo = b.tasks.map((t) => ({ t, run: facts.find((f) => f.runId === statuses.get(t.id)?.current) }))
       .filter(({ t, run }) => t.workspaceId === workspaceId && t.project === project && statuses.get(t.id)?.done && isCopy(run?.workMode) && run!.board === h.ref
@@ -1111,6 +1248,7 @@ export function createRunManager(deps: RunManagerDeps) {
       const t = r.board.tasks.find((x) => x.id === taskId) ?? refuse("task_not_found", `no task ${taskId}`);
       if (t.archivedAt) refuse("task_archived", "the task is archived");
       if (t.external) refuse("external_task", "an external task is not split: the person marks it «Done»"); // F2 (T-3)
+      remoteBaseOff(await optsOf([t]), t);
       if (!t.decompose || t.parentId) refuse("invalid_task", "the task is not marked «Split into subtasks»");
       const facts = await taskFacts();
       if ([...(startingRuns.get(t.id) ?? [])].length || facts.some((f) => f.taskId === t.id && f.status !== "unreadable" && !TERMINAL_STATUSES.includes(f.status))) {
@@ -1119,7 +1257,7 @@ export function createRunManager(deps: RunManagerDeps) {
       if (splitGoesOn(t, facts)) refuse("decomposition_active", `${t.key} is being split`);
       if (r.board.tasks.some((x) => x.parentId === t.id && !x.archivedAt)) refuse("has_subtasks", `${t.key} has subtasks`);
       const heads = await merges.heads([{ workspaceId: t.workspaceId, project: t.project }]).catch(() => [] as BoardHead[]);
-      if (boardStatuses(r.board, facts, heads).get(t.id)?.depsWait) refuse("deps_not_ready", `${t.key} waits for its dependencies`);
+      if (boardStatuses(r.board, facts, heads, await optsOf(r.board.tasks)).get(t.id)?.depsWait) refuse("deps_not_ready", `${t.key} waits for its dependencies`);
       // the board's result of the place, else the project's HEAD
       const base = heads.find((h) => h.workspaceId === t.workspaceId && h.project === t.project)?.commit
         ?? await run(deps.gitPath(), ["rev-parse", "HEAD"], { cwd: t.project }).then((o) => o.stdout.trim(), () => "");
@@ -1173,7 +1311,7 @@ export function createRunManager(deps: RunManagerDeps) {
   // the direct dependents of t that have begun — a run, one being made, a split (or one being made), a mark of their own.
   // Called inside the board's queue: a run of a dependent finished meanwhile is seen (review of F2)
   const begunOf = (facts: readonly RunTaskFacts[]) => async (b: Board, t: BoardTask): Promise<string[]> => {
-    const st = boardStatuses(b, facts);
+    const st = boardStatuses(b, facts, [], await optsOf(b.tasks));
     return b.tasks.filter((x) => x.dependsOn.includes(t.id) && x.workspaceId === t.workspaceId
       && ((st.get(x.id)?.attempts ?? 0) > 0 || startingTasks.has(x.id) || startingSplits.has(x.id) || facts.some((f) => f.decompositionOf === x.id) || !!x.externalDone)).map((x) => x.key);
   };
@@ -1181,7 +1319,7 @@ export function createRunManager(deps: RunManagerDeps) {
   async function markExternal(taskId: string, done: boolean, note: string | null): Promise<BoardTask> {
     return board.markExternal(taskId, done, note, async (b, t) => {
       const facts = await taskFacts(); // inside the queue
-      const st = boardStatuses(b, facts);
+      const st = boardStatuses(b, facts, [], await optsOf(b.tasks));
       if ((st.get(t.id)?.attempts ?? 0) > 0) refuse("external_has_runs", `${t.key} has runs of its own: it goes by them`);
       if (done) {
         const open = t.dependsOn.map((d) => b.tasks.find((x) => x.id === d)).filter((d): d is BoardTask => !!d && !st.get(d.id)?.done).map((d) => d.key);
@@ -1197,7 +1335,7 @@ export function createRunManager(deps: RunManagerDeps) {
     const { board: b } = await board.read();
     if (!b.tasks.some((t) => t.id === taskId)) refuse("task_not_found", `no task ${taskId}`);
     const facts = await taskFacts();
-    const st = boardStatuses(b, facts).get(taskId)!;
+    const st = boardStatuses(b, facts, [], await optsOf(b.tasks)).get(taskId)!;
     const run = facts.find((f) => f.runId === st.current);
     if (run?.status !== "completed" || run.completion !== "no_checks") refuse("accept_unavailable", "only a result completed without checks is accepted");
     return board.accept(taskId, run!.runId);
@@ -1233,6 +1371,7 @@ export function createRunManager(deps: RunManagerDeps) {
     const c = inQueue ?? await canvas.read(exists);
     if (runOwners(c, known)(runId) !== t!.workspaceId) refuse("task_workspace", `${t!.key} belongs to another workspace`);
     const facts = await taskFacts(c);
+    const opts = await optsOf(b.tasks); // F3 (T-13a): the place's options, as the board shows them
     // another run of the task: active by its journal, or being created now (two starts at once, review of B4)
     if ([...(startingRuns.get(t!.id) ?? [])].some((id) => id !== runId)
       || facts.some((f) => f.taskId === t!.id && f.runId !== runId && f.status !== "unreadable" && !TERMINAL_STATUSES.includes(f.status))) {
@@ -1242,6 +1381,18 @@ export function createRunManager(deps: RunManagerDeps) {
     if (t!.external && !facts.some((f) => f.taskId === t!.id && f.workspaceId === t!.workspaceId)) refuse("external_task", `${t!.key} is external: a person marks it «Done»`);
     // E2 (stage-e-decomposition.md §3.4): no start of a parent while it is being split — the person's or the autopilot's
     if (decompositionActive(t!, facts)) refuse("decomposition_active", `${t!.key} is being split`);
+    // F3 (T-13c): at a remote base the autopilot starts the board's tasks (its base is the remote's); the dialog's start
+    // is refused. T-13b: that base only with the profile's runBase, the remote branch's commit as the project has it now
+    // (no new fetch); no board's result is read — the place's statuses alone (a direct dependency on an ordinary task: waits_mr)
+    if (opts.remoteBase.has(placeKey(t!)) && goal.base?.key !== "remote") refuse("remote_base_dialog", "in this project the board's tasks are started by the autopilot");
+    if (goal.base?.key === "remote") {
+      const rb = (await profiles.get(source))?.runBase;
+      if (!rb || goal.base.branch !== `${rb.remote}/${rb.branch}` || await trackCommit(source, rb) !== goal.base.commit) refuse("invalid_base", "the base is not the remote branch as the project has it now");
+      if (anyway) return;
+      const wait = boardStatuses(b, facts, [], opts).get(t!.id)?.depsWait;
+      if (wait) refuse("task_not_ready", `${t!.key} waits for ${wait.waitsFor.join(", ")}`);
+      return;
+    }
     // C1: from the board's merged head of the task's place, as it is now; a dependency counts once it is in the head
     // (owner's decision 9 of stage C) — B's rule of results in branches does not apply then
     if (goal.base && BOARD_REF.test(goal.base.branch)) {
@@ -1249,7 +1400,7 @@ export function createRunManager(deps: RunManagerDeps) {
       if (!h || h.ref !== goal.base.branch || h.commit !== goal.base.commit || goal.base.key !== "T-0") refuse("invalid_base", "the base is not the board's merged head as it is now");
       if (anyway) return;
       const into = await merges.mergesInto(h!.ref, source);
-      const statuses = boardStatuses(b, facts);
+      const statuses = boardStatuses(b, facts, [], opts);
       // E2 (§2.2): the dependencies that hold it, as the autopilot's step and boardStatuses take them — an archived subtask does not
       const out = heldDeps(t!, b.tasks).map((d) => b.tasks.find((x) => x.id === d)!)
         .filter((d) => {
@@ -1263,7 +1414,7 @@ export function createRunManager(deps: RunManagerDeps) {
     }
     if (goal.base) {
       const from = b.tasks.filter((d) => t!.dependsOn.includes(d.id) && d.key === goal.base!.key);
-      const statuses = boardStatuses(b, facts);
+      const statuses = boardStatuses(b, facts, [], opts);
       const ok = from.some((d) => {
         const run = facts.find((f) => f.runId === statuses.get(d.id)?.current);
         return run?.taken?.branch === goal.base!.branch && run.taken.commit === goal.base!.commit;
@@ -1274,7 +1425,7 @@ export function createRunManager(deps: RunManagerDeps) {
     // C2: a place with the board's merged head — its dependencies count once in it (decision 9); a start from the working
     // folder without them is the person's choice (withoutBase), said in the goal dialog
     const heads = await merges.heads([{ workspaceId: t!.workspaceId, project: source }]).catch(() => [] as BoardHead[]);
-    const statusesNow = boardStatuses(b, facts, heads);
+    const statusesNow = boardStatuses(b, facts, heads, opts);
     const wait = statusesNow.get(t!.id)?.depsWait;
     if (wait && !(wait.reason === "waits_head" && withoutBase)) refuse("task_not_ready", `${t!.key} waits for ${wait.waitsFor.join(", ")}: start anyway?`);
     const inHeadOnly = t!.dependsOn.filter((d) => {
@@ -1304,12 +1455,21 @@ export function createRunManager(deps: RunManagerDeps) {
       if (h) input = { ...input, goal: { ...input.goal, base: { ...base, branch: h.ref, commit: h.commit } } };
     }
     if (input.goal?.task) queueFailed.delete(input.goal.task.id);
+    // F3 (T-13c): the dialog's start of a board task at a remote base is refused before any queue (taskOk again inside)
+    if (input.goal?.task && input.goal.base?.key !== "remote" && !(await exists(input.requestId))) {
+      const t = (await board.read()).board.tasks.find((x) => x.id === input.goal.task!.id);
+      if (t && (await optsOf([t])).remoteBase.has(placeKey(t))) refuse("remote_base_dialog", "in this project the board's tasks are started by the autopilot");
+    }
     // C1 (§3.1): a run in a separate copy (C2: or a worktree) is held off only by a run that is not in one
     const project = await leadProject(input.linkId);
     const mode = input.goal?.workMode ?? (input.goal?.mode ? ((await profiles.get(project)) ?? await suggestProfile(project)).workMode : undefined);
     // a merge into the board's result reads the project's repository and moves its ref: the project folder waits
     if (mode !== "copy" && mode !== "worktree" && await merges.active(project)) refuse("folder_busy", "a merge into the board's result goes on in this project");
     const queues = !!places && !!input.goal?.task && isCopy(mode);
+    // F3 (T-6): the template's names on the remote — before the canvas lock, never inside its queue; every start asks
+    // again (the autopilot retries a busy link with a new requestId)
+    const taken = await remoteBranchesTaken(input, project);
+    if (taken) remoteTaken.set(input.requestId, taken);
     try {
       return await canvas.startOnLink(input.linkId, input.requestId, busy, exists, async (source, current) => {
         // in the canvas queue: two starts at once cannot both take the last place
@@ -1330,6 +1490,8 @@ export function createRunManager(deps: RunManagerDeps) {
       queueTimer ??= setInterval(() => void drainQueue(), 2000);
       queueTimer.unref?.();
       return { runId: input.requestId, created: false, queued: { busy: n, limit } };
+    } finally {
+      remoteTaken.delete(input.requestId);
     }
   }
   // C2 (owner's decision 12): the places of a project — its runs in a copy or a worktree that are not over (a pause
@@ -1412,7 +1574,9 @@ export function createRunManager(deps: RunManagerDeps) {
     boardBudget: (linkId: string, budget: AutopilotBudget | null) => result(() => board.budget(linkId, budget)),
     boardCreate: (input: TaskInput) => result(async () => {
       workspaceOk(input?.workspaceId);
-      return board.create({ ...input, project: await realpath(input.project).catch(() => refuse("invalid_task", "the project folder does not exist")) });
+      const project = await realpath(input.project).catch(() => refuse("invalid_task", "the project folder does not exist"));
+      if (input.decompose === true) remoteBaseOff(await optsOf([{ workspaceId: input.workspaceId, project }]), { workspaceId: input.workspaceId, project });
+      return board.create({ ...input, project });
     }),
     // F1 (stage-f-external-projects.md §5.4): the check of a board-tasks/v1 file (nothing is written: checked,
     // invalid_file or refused) and «Import» of the report the person was shown. «Import» reads the file again: another
@@ -1441,6 +1605,10 @@ export function createRunManager(deps: RunManagerDeps) {
     onBoardChange: (listener: (e: { kind: "inbox" }) => void) => { boardListeners.add(listener); return () => { boardListeners.delete(listener); }; },
     // E2: «Do it whole» is refused while the task is being split (the store refuses it with live subtasks)
     boardUpdate: (id: string, patch: Parameters<typeof board.update>[1]) => result(async () => {
+      if (patch?.decompose === true) { // F3 (T-13c): «Split» at a remote base
+        const t = (await board.read()).board.tasks.find((x) => x.id === id);
+        if (t && !t.decompose) remoteBaseOff(await optsOf([t]), t);
+      }
       if (patch?.decompose === false) {
         const t = (await board.read()).board.tasks.find((x) => x.id === id);
         if (t && decompositionActive(t, await taskFacts())) refuse("decomposition_active", `${t.key} is being split`);
@@ -1734,9 +1902,15 @@ export function createRunManager(deps: RunManagerDeps) {
         const remote = (await gitRemotes(deps.gitPath(), project)).find((r) => r.name === push!.remote) ?? refuse("invalid_profile", `no remote ${push.remote} in the project`);
         push = { ...push, remoteUrl: remote.url };
       }
+      // F3 (T-6): the template's name with the probe values, as git itself takes a branch name
+      if (p.branchTemplate && !(await run(deps.gitPath(), ["check-ref-format", "--branch", fillBranch(p.branchTemplate, PROBE_FIELDS)], { cwd: project, timeout: 10_000 }).then(() => true, () => false))) {
+        refuse("branch_template_invalid", "branchTemplate: git does not take the name it makes as a branch");
+      }
+      // F3 (T-13a): the remote base's fetch address as git reads it (insteadOf expanded) — one, the same the start checks
+      const runBase = p.runBase ? { ...p.runBase, remoteUrl: await fetchUrlOf(project, p.runBase.remote, p.env.direnv) } : undefined;
       runtimes.delete(`folder:${project}`);
       runtimes.delete(`worktree:${project}`);
-      return profiles.save(project, { ...p, grants: before.filter((g) => keep.has(g.id)), finish: { ...p.finish, push } });
+      return profiles.save(project, { ...p, grants: before.filter((g) => keep.has(g.id)), finish: { ...p.finish, push }, ...(runBase ? { runBase } : {}) });
     }),
     // The models Codex offers for the settings and the goal (model/list, config/read; no model turn). refresh: «Обновить».
     codexModels: (linkId: string, refresh = false) => result(async (): Promise<OrchestrationCodexModels> => {
@@ -1850,6 +2024,7 @@ export function createRunManager(deps: RunManagerDeps) {
     },
     // E3 (stage-e-decomposition.md §7): the split of a parent by the autopilot
     decompose: (taskId, language) => result(() => startDecomposition(taskId, language)),
+    remoteBase: (project) => result(() => remoteBase(project)),
     newId: () => randomUUID(),
     now: () => Date.now()
   }, async (linkId) => (await board.read()).board.autopilot?.[linkId] ?? AUTOPILOT_BUDGET);

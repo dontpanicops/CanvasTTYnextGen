@@ -6,7 +6,7 @@ import type { LocaleId, NotificationSettings } from "../../../../shared/contract
 import { t } from "../../lib/i18n.ts";
 import { PAUSES, providerName, viewPauseLabel } from "./runModel.ts";
 import { stopText, tr } from "./boardModel.ts";
-import { boardStatuses, type AutopilotState, type Board, type BoardHead, type RunTaskFacts } from "../../../../shared/taskBoard.ts";
+import { boardStatuses, type AutopilotState, type Board, type BoardHead, type BoardOpts, type RunTaskFacts } from "../../../../shared/taskBoard.ts";
 
 export type NotifySignal = "waiting" | "completed" | "completed_no_checks" | "failed";
 export type NotifyPrefs = NotificationSettings;
@@ -134,11 +134,11 @@ export function boardHeadNotes(locale: LocaleId, heads: readonly BoardHead[], au
 // for the first time is only recorded, so a restart repeats none. waiting: the splits that wait (question,
 // decomposition_failed, decomposition_paused), for the Dock badge.
 export function splitNotes(locale: LocaleId, board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], heads: readonly BoardHead[], notified: Readonly<Record<string, string>>,
-  prefs: NotifyPrefs, focused: boolean, place: (project: string) => string): { notes: Note[]; notified: Record<string, string>; waiting: number } {
+  prefs: NotifyPrefs, focused: boolean, place: (project: string) => string, opts: BoardOpts = {}): { notes: Note[]; notified: Record<string, string>; waiting: number } {
   const next: Record<string, string> = { ...notified };
   const notes: Note[] = [];
   let waiting = 0;
-  const statuses = boardStatuses(board, facts, heads);
+  const statuses = boardStatuses(board, facts, heads, opts); // F3: the places' options of the board's view (boardOptsOf)
   for (const task of board.tasks) {
     const st = statuses.get(task.id);
     if (!task.decompose || !st?.split) continue;

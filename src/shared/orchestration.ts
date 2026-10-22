@@ -47,6 +47,12 @@ export interface OrchestrationProjectProfile {
   };
   grants: OrchestrationGrant[];
   savedAt: string | null; // null: suggested from the repository, never saved
+  // F3 (stage-f-external-projects.md §7.3, T-6): the name of a board task's worktree branch — {issue}, {ref} (else the
+  // task's key), {run8}; it must hold {ref} or {run8}. Absent: canvastty/<run8>, as before. Worktree only
+  branchTemplate?: string;
+  // F3 (T-13a, T-13b): a board task's run starts from this branch of the remote, fetched (no board's result, no merge
+  // into it, no take after «Done»); remoteUrl — its fetch address, read by main when the profile is saved. Worktree only
+  runBase?: { remote: string; branch: string; remoteUrl: string | null };
 }
 export interface OrchestrationAccessOption { mode: string; mapping: string }
 // The model of each role, passed to that role's CLI for one thread or one run; null — as in the CLI: nothing is passed,

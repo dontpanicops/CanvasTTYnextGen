@@ -314,7 +314,7 @@ test("import (F2): external accepted — without criteria Loom's one line, the s
   assert.deepEqual(inboxTasks(Buffer.from(JSON.stringify({ tasks: [row("A"), row("B", { external: true })] }))).map((x) => x.external), [false, true]);
 });
 
-test("import (F2): models accepted and over the profile; null or an unknown role → invalid_task; a file without models takes them off; issue, commitTitle, scope still field_not_supported", async () => {
+test("import (F2): models accepted and over the profile; null or an unknown role → invalid_task; a file without models takes them off; scope still field_not_supported (issue and commitTitle: F3)", async () => {
   const st = store();
   let rows = await imp(st, [row("T1", { models: { executor: "opus", lead: "gpt-5.5:high" } }), row("T2", { models: { executor: null } }), row("T3", { models: { writer: "x" } }),
     row("T4", { models: { executor: "bad model" } }), row("T5", { models: {} })]);
@@ -327,7 +327,7 @@ test("import (F2): models accepted and over the profile; null or an unknown role
   assert.deepEqual(byRef(st, "T1").models, { executor: "sonnet" });
   rows = await imp(st, [row("T1")]);
   assert.deepEqual([rows.updated.map((x) => x.ref), "models" in byRef(st, "T1")], [["T1"], false]);
-  for (const [field, value] of [["issue", "ISSUE-1"], ["commitTitle", "feat: x"], ["scope", ["docs/**"]]]) {
+  for (const [field, value] of [["scope", ["docs/**"]]]) {
     assert.deepEqual(codes(await imp(st, [row("X", { [field]: value })])), [["X", "field_not_supported"]], field);
   }
 });

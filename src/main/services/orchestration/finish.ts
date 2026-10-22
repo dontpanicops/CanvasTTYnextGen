@@ -16,8 +16,10 @@ export type FinishParams = { step: "commit"; commit: CommitParams } | { step: "p
 
 export const trailer = (runId: string) => `CanvasTTY-Run: ${runId}`;
 
-export function commitMessage(goalText: string, runId: string): string {
-  const first = goalText.split(/\r?\n/).find((l) => l.trim() !== "")?.trim() ?? "CanvasTTY run";
+// title (F3, T-7): the board task's commitTitle — in place of the text's first non-empty line; the trailer stays. The
+// format of the title is the project's hooks' business, not Loom's
+export function commitMessage(goalText: string, runId: string, title?: string | null): string {
+  const first = title?.trim() || (goalText.split(/\r?\n/).find((l) => l.trim() !== "")?.trim() ?? "CanvasTTY run");
   return `${first.length > 72 ? `${first.slice(0, 71)}…` : first}\n\n${trailer(runId)}\n`;
 }
 
@@ -39,6 +41,12 @@ export const remoteHeadLine = (p: { remote: string; branch: string }, out: strin
 // own file: both must be there, and every address in them must be the one the person allowed.
 export const remoteUrlLine = (remote: string, fetchOut: string, pushOut: string) =>
   `git remote get-url --all ${shq(remote)} ${into(fetchOut)} && git remote get-url --push --all ${shq(remote)} ${into(pushOut)}`;
+// F3 (T-6, T-13b): the fetch addresses alone (`git remote get-url --all`, insteadOf expanded) — the base is fetched, never
+// pushed to, so its pushurl is not asked: every address must be the allowed one, and there must be one
+export function fetchUrlsMatch(fetch: string | null, allowed: string): boolean {
+  const f = (fetch ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  return f.length > 0 && f.every((u) => u === allowed);
+}
 export function remoteUrlsMatch(fetch: string | null, push: string | null, allowed: string): boolean {
   const urls = (text: string | null) => (text ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const f = urls(fetch), p = urls(push);

@@ -321,8 +321,10 @@ async function assertNoGitlinks(ctx: GitContext, tree: string): Promise<void> {
 // working folder (a worktree: instead of HEAD) —
 // the result branch of the task this run's task depends on. The working folder, its index and HEAD are not read for the
 // baseline then; the commit becomes the baseline's parent (what «Take the result» builds on).
-export async function createWorkspace(opts: { root: string; runId: string; source: string; gitPath: string; userHome?: string; mode?: WorkMode; from?: string }): Promise<Workspace> {
+// branch (F3, T-6; a worktree only): the worktree's branch name main chose — absent: canvastty/<run8>; taken already: ref_conflict
+export async function createWorkspace(opts: { root: string; runId: string; source: string; gitPath: string; userHome?: string; mode?: WorkMode; from?: string; branch?: string }): Promise<Workspace> {
   const mode: WorkMode = opts.mode ?? "copy";
+  if (opts.branch !== undefined && (mode !== "worktree" || !/^(?!-)[A-Za-z0-9._/-]{1,200}$/.test(opts.branch) || opts.branch.includes(".."))) fail("invalid_input", "a branch name is given for a worktree only");
   if (opts.from !== undefined && (mode === "project" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(opts.from))) fail("invalid_base", "a base commit is a full object id, for a separate copy or a worktree only");
   const rd = runDir(opts?.root, opts?.runId);
   requireAbsolute(opts.gitPath, "gitPath");
@@ -349,7 +351,7 @@ export async function createWorkspace(opts: { root: string; runId: string; sourc
     mode, runId: opts.runId, root: opts.root, dir, repo: repoPath(mode, info.path, rd, dir), control: join(dir, "control.git"), tmp: join(dir, "tmp"),
     sourcePath: info.path, sourceGitDir: info.gitDir, gitPath: opts.gitPath,
     baseline: { commit: "", tree: "", parent: info.head }, head: info.head,
-    branch: mode === "worktree" ? `canvastty/${opts.runId.slice(0, 8)}` : null
+    branch: mode === "worktree" ? opts.branch ?? `canvastty/${opts.runId.slice(0, 8)}` : null
   };
   let added: string | null = null; // the worktree's start, once it and its branch exist
   let adding: string | null = null; // the same, from the moment `worktree add -b` was asked

@@ -6,13 +6,14 @@ import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { EXTERNAL_CRITERION, type ImportReport, type InboxTask } from "../../../shared/taskBoard.ts";
-import { isModels, REF, WORKSPACE_ID, type ImportJob, type ImportRow, type ImportRows } from "./boardStore.ts";
+import { isCommitTitle, isModels, ISSUE, REF, WORKSPACE_ID, type ImportJob, type ImportRow, type ImportRows } from "./boardStore.ts";
 
 export const IMPORT_MAX_BYTES = 1024 * 1024;
 const TOP = new Set(["format", "workspaceId", "workspace", "source", "tasks"]);
-const FIELDS = new Set(["ref", "project", "title", "text", "criteria", "dependsOn", "ifAbsent", "external", "models"]);
-// known fields of later stages: refused row by row until their stage is in (§5.1); F2 takes external and models
-const LATER: Record<string, string> = { issue: "F3", commitTitle: "F3", scope: "F4" };
+const FIELDS = new Set(["ref", "project", "title", "text", "criteria", "dependsOn", "ifAbsent", "external", "models", "issue", "commitTitle"]);
+// known fields of later stages: refused row by row until their stage is in (§5.1); F2 takes external and models, F3
+// issue and commitTitle
+const LATER: Record<string, string> = { scope: "F4" };
 
 // the open workspaces: by id (the check of workspaceOk) and by name (their title)
 export interface ImportWorkspaces { open(id: string): boolean; named(title: string): string[] }
@@ -99,6 +100,9 @@ export async function readTasksFile(file: string, bytes: Uint8Array, ws: ImportW
     if (o.models !== undefined && !(isModels(o.models) || (o.models && typeof o.models === "object" && !Array.isArray(o.models) && Object.keys(o.models).length === 0))) {
       no("invalid_task", "models: {lead?, executor?, reviewer?} of model names (no null)"); continue;
     }
+    // F3 (T-6, T-7): the issue for the branch template, the commit's title — Loom reads neither
+    if (o.issue !== undefined && (typeof o.issue !== "string" || !ISSUE.test(o.issue))) { no("invalid_task", "issue: ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"); continue; }
+    if (o.commitTitle !== undefined && !isCommitTitle(o.commitTitle)) { no("invalid_task", "commitTitle: one line of 1..72 characters, no control characters"); continue; }
     // T-10: the requirements come from the project's plan; Loom does not make them up. T-3: an external task without
     // them gets Loom's one line (a build before F2 needs ≥1 requirement)
     const none = o.criteria === undefined || (Array.isArray(o.criteria) && o.criteria.length === 0);
@@ -108,7 +112,8 @@ export async function readTasksFile(file: string, bytes: Uint8Array, ws: ImportW
     const models = isModels(o.models) ? o.models : undefined;
     rows.push({ ref, ifAbsent: o.ifAbsent === true, deps: deps as string[],
       input: { workspaceId, project, title: o.title as string, text: o.text as string, criteria: none ? [EXTERNAL_CRITERION] : o.criteria as string[] },
-      fields: { ...(o.external === true ? { external: true as const } : {}), ...(models ? { models: { ...models } } : {}) } });
+      fields: { ...(o.external === true ? { external: true as const } : {}), ...(models ? { models: { ...models } } : {}),
+        ...(typeof o.issue === "string" ? { issue: o.issue } : {}), ...(typeof o.commitTitle === "string" ? { commitTitle: o.commitTitle } : {}) } });
   }
   return { job: { workspaceId, origin: { kind: "import", source: (doc.source as string | undefined) ?? null, file: file.slice(0, 255), sha256: sha }, rows } };
 }

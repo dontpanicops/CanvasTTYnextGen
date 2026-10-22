@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SessionBounds } from "../../../../shared/contracts";
 import type { OrchestrationResult } from "../../../../shared/orchestration";
-import { boardStatuses, overlapsOf, type AutopilotBudget, type Overlap, type BoardTask, type BoardTaskInput, type BoardTaskPatch, type BoardView, type TaskStatus } from "../../../../shared/taskBoard";
+import { boardOptsOf, boardStatuses, overlapsOf, type AutopilotBudget, type Overlap, type BoardTask, type BoardTaskInput, type BoardTaskPatch, type BoardView, type TaskStatus } from "../../../../shared/taskBoard";
 import type { Orchestration } from "./useOrchestration";
 
 export function useBoard(orch: Orchestration) {
@@ -26,8 +26,9 @@ export function useBoard(orch: Orchestration) {
     return () => window.clearTimeout(id);
   }, [runs, reload]);
 
-  // C2: a place with the board's merged head waits for its dependencies there (decision 9)
-  const statuses = useMemo(() => (view ? boardStatuses(view.board, view.facts, view.heads ?? []) : new Map<string, TaskStatus>()), [view]);
+  // C2: a place with the board's merged head waits for its dependencies there (decision 9); F3 (T-13a): the places'
+  // options main gives with the board (a remote base, a template that needs the issue)
+  const statuses = useMemo(() => (view ? boardStatuses(view.board, view.facts, view.heads ?? [], boardOptsOf(view)) : new Map<string, TaskStatus>()), [view]);
   // B4: while an autopilot of a link is on, its steps (a take, a stop) may change nothing the runs show: read every 2 s
   const anyOn = !!view && (Object.values(view.autopilot ?? {}).some((s) => s.on)
     || !!view.heads?.some((h) => h.merges.some((m) => m.status === "preparing" || m.status === "running")) // C1: a merge has no run on a link

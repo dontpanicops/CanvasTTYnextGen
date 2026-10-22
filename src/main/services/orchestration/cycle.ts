@@ -41,6 +41,9 @@ export interface Goal {
   language?: "ru" | "en"; // the interface language at creation: the person-facing texts are asked for in it
   task?: { id: string; key: string; ref?: string }; // B1, journal v2 only: the board task (journal-v2-format.md §2.10); not used by the cycle
   base?: { branch: string; commit: string; key: string }; // B4, journal v2 copy only: what the copy started from; not used by the cycle
+  // F3 (T-6), journal v2 worktree only, set by main: the worktree's branch (the profile's template, or canvastty/<run8> at
+  // a remote base); absent: canvastty/<run8>. Not used by the cycle
+  branch?: string;
   // C3 (stage-c3-conflicts.md §3): a resolution run of a merge into the board's result — its copy starts from `base` (the
   // conflict as a commit), its plan is the application's. Not `task`: the run is never a task's run (metaOf, boardStatuses)
   resolution?: { mergeRunId: string; taskId: string; key: string; base: string };

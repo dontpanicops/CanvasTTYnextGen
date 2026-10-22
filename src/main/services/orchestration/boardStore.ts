@@ -19,6 +19,9 @@ class Refusal extends Error {
 const refuse = (code: string, message: string): never => { throw new Refusal(code, message); };
 
 export const REF = /^[A-Za-z0-9][A-Za-z0-9-]{0,31}$/;
+// F3 (§5.1, T-6, T-7): a task's issue (characters a branch name takes) and its commit's title (one line, no control characters)
+export const ISSUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const isCommitTitle = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && v.length <= 72 && !/[\u0000-\u001f\u007f\u2028\u2029]/.test(v);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const KEY = /^T-(\d{1,6})$/;
@@ -37,7 +40,7 @@ const time = (v: unknown) => typeof v === "string" && v.length <= 40 && !Number.
 const isOrigin = (o: Partial<BoardTaskOrigin> | null): boolean => !!o && typeof o === "object" && o.kind === "import"
   && (o.source === null || (typeof o.source === "string" && o.source.length <= 300)) && typeof o.file === "string" && o.file.length >= 1 && o.file.length <= 255
   && typeof o.sha256 === "string" && /^[0-9a-f]{64}$/.test(o.sha256);
-// F2 (T-3, T-4): external, externalDone and models — softly too
+// F2 (T-3, T-4): external, externalDone and models — softly too; F3 (T-6, T-7): issue and commitTitle
 const ROLES = ["lead", "executor", "reviewer"];
 export const isModels = (m: unknown): m is TaskModels => !!m && typeof m === "object" && !Array.isArray(m) && Object.keys(m).length > 0
   && Object.entries(m).every(([k, v]) => ROLES.includes(k) && typeof v === "string" && SAFE_MODEL.test(v));
@@ -46,9 +49,10 @@ const isMark = (d: Partial<BoardExternalDone> | null): boolean => !!d && typeof 
   && (d.note === null || (typeof d.note === "string" && d.note.length <= NOTE_MAX));
 const soft = (t: unknown): unknown => {
   if (!t || typeof t !== "object") return t;
-  const { ref, origin, external, externalDone, models, ...rest } = t as Record<string, unknown>;
+  const { ref, origin, external, externalDone, models, issue, commitTitle, ...rest } = t as Record<string, unknown>;
   return { ...rest, ...(typeof ref === "string" && REF.test(ref) ? { ref } : {}), ...(isOrigin(origin as BoardTaskOrigin) ? { origin } : {}),
-    ...(external === true ? { external } : {}), ...(external === true && isMark(externalDone as BoardExternalDone) ? { externalDone } : {}), ...(isModels(models) ? { models } : {}) };
+    ...(external === true ? { external } : {}), ...(external === true && isMark(externalDone as BoardExternalDone) ? { externalDone } : {}), ...(isModels(models) ? { models } : {}),
+    ...(typeof issue === "string" && ISSUE.test(issue) ? { issue } : {}), ...(isCommitTitle(commitTitle) ? { commitTitle } : {}) };
 };
 
 function isTask(t: unknown): t is BoardTask {
@@ -89,7 +93,7 @@ export interface SplitPlan { criteria: number; language: "ru" | "en"; tasks: Spl
 // refused there carries its refusal: its dependents are refused with it
 // fields (F2): external and models of the row, as they are to be stored (absent: taken off an existing task)
 export interface ImportRow { ref: string | null; input: TaskInput | null; deps: string[]; ifAbsent: boolean; refused?: { code: string; detail: string }; fields?: ImportFields }
-export interface ImportFields { external?: true; models?: TaskModels }
+export interface ImportFields { external?: true; models?: TaskModels; issue?: string; commitTitle?: string }
 export interface ImportJob { workspaceId: string; origin: BoardTaskOrigin; rows: ImportRow[] }
 export interface ImportRows {
   created: { ref: string; key: string }[]; updated: { ref: string; key: string }[]; unchanged: string[];
@@ -279,7 +283,8 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
         if (k !== "create" && k !== "update") return;
         const input = r.input!;
         const own = { title: input.title, text: input.text, criteria: [...input.criteria], dependsOn: r.deps.map((d) => idOf(d)!), origin: job.origin,
-          ...(r.fields?.external ? { external: true as const } : {}), ...(r.fields?.models ? { models: { ...r.fields.models } } : {}) };
+          ...(r.fields?.external ? { external: true as const } : {}), ...(r.fields?.models ? { models: { ...r.fields.models } } : {}),
+          ...(r.fields?.issue ? { issue: r.fields.issue } : {}), ...(r.fields?.commitTitle ? { commitTitle: r.fields.commitTitle } : {}) };
         if (k === "create") {
           made.set(ids[i], { id: ids[i], key: "", workspaceId: ws, project: input.project, ...own, order: ++order, createdAt: at, updatedAt: at, archivedAt: null, accepted: null, ref: r.ref! });
           return;
