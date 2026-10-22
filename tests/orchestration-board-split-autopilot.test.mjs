@@ -570,6 +570,27 @@ test("a split → three subtasks (two at once, the third after the first) → th
 });
 
 
+test("a split with one subtask archived: the others «Done» and in the head — the parent's start from the head passes the start's check (heldDeps, as the step), all_done", OPTS, async () => {
+  const src = fs.realpathSync(project());
+  // the person's split 1; S1's copy 2; the parent's closing run 3 (S2 archived before the autopilot is on)
+  const two = { tasks: [part("S1", ["R1"]), part("S2", ["R2"])], whole: null, question: null };
+  const m = manager(scripts([decide(two)], turns("s1.txt"), turns("p.txt", ["R1", "R2"])));
+  const linkId = await prepare(m, src, "copy", 1);
+  const parent = (await m.boardCreate(parentInput(src, { criteria: ["first", "second"] }))).value;
+  assert.ok((await m.boardDecompose(parent.id, "en")).ok);
+  const subs = await until(async () => { const t = (await m.board()).value.board.tasks.filter((x) => x.parentId === parent.id); return t.length === 2 ? t : null; }, "the subtasks");
+  const [s1, s2] = subs.sort((a, b) => a.order - b.order);
+  assert.ok((await m.boardArchive(s2.id, true)).ok);
+  assert.ok((await m.boardAutopilot(linkId, true, "en")).ok);
+  const end = await ended(m, linkId);
+  assert.equal(end.stop.code, "all_done", JSON.stringify(end));
+  const v = (await m.board()).value;
+  const st = boardStatuses(v.board, v.facts, v.heads);
+  assert.deepEqual([parent, s1].map((t) => st.get(t.id).done), ["confirmed", "confirmed"]);
+  assert.equal(v.facts.filter((f) => f.taskId === s2.id).length, 0, "the archived subtask is not run");
+  await m.shutdown();
+});
+
 test("a split at a provider's limit: the autopilot waits, then continues the run itself; the lead says «whole» — the parent is run as an ordinary task, all_done", OPTS, async () => {
   const src = fs.realpathSync(project());
   const resetsAt = Math.floor(Date.now() / 1000) - 600; // behind by 10 min: due at once

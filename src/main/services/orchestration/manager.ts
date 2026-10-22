@@ -56,8 +56,8 @@ import { createBoardStore } from "./boardStore.ts";
 import { fileRefusal, importReport, readImportFile, readTasksFile, sha256 } from "./boardImport.ts";
 import { createInbox, inboxNameOk } from "./boardInbox.ts";
 import type { SplitTask, TaskInput } from "./boardStore.ts";
-import { boardStatuses, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, WAIT_PAUSES, type BoardHead } from "../../../shared/taskBoard.ts";
-import { AUTOPILOT_BUDGET, baseOf, type AutopilotBudget, type BoardPlace, type BoardTask, type BoardView, type ImportReport, type RunTaskFacts } from "../../../shared/taskBoard.ts";
+import { boardStatuses, heldDeps, isCopy, mergeOfTask, namedPaths, parallelOf, runPhase, WAIT_PAUSES, type BoardHead } from "../../../shared/taskBoard.ts";
+import { AUTOPILOT_BUDGET, baseOf, type AutopilotBudget, type Board, type BoardPlace, type BoardTask, type BoardView, type ImportReport, type RunTaskFacts } from "../../../shared/taskBoard.ts";
 import type { OrchestrationRunView, OrchestrationTurnPurpose, OrchestrationWorkMode } from "../../../shared/orchestration.ts";
 import { viewCause } from "../../../shared/orchestrationPause.ts";
 import { runOwners, workspaceOf } from "../../../shared/workspaceOwnership.ts";
@@ -103,6 +103,7 @@ export interface RunManagerDeps {
   nodePath(): string; // the node-test check's program (its own real path)
   agents(attemptRoot: string): Promise<AgentAdapter>; // runs of stages 4–11 (goals whose checks are catalog ids)
   cloneDir?: CloneDir; // tests only: the clone of a dependency folder
+  board?: ReturnType<typeof createBoardStore>; // tests only: the board's store over root/board.json (to hold its queue)
   // Stage 12: the CLIs as the user runs them in a terminal of `project`. Absent: new goals with commands are refused.
   // Stage 13: direnv — apply the project's allowed .envrc (the project profile's choice).
   // direnvCwd: a worktree run's folder (direnv applies there); worktreePending: a worktree run not created yet.
@@ -200,7 +201,7 @@ export function createRunManager(deps: RunManagerDeps) {
   const known = (id: string) => deps.workspaceKnown?.(id) ?? true;
   const canvas = createCanvasStore(canvasFile(deps.root), known); // reads nothing until asked
   // B1: the task board (stage-b-board.md §3); a task's number is above every T-<n> its workspace's runs name
-  const board = createBoardStore(join(deps.root, "board.json"), async (workspaceId) => {
+  const board = deps.board ?? createBoardStore(join(deps.root, "board.json"), async (workspaceId) => {
     const facts = await taskFacts();
     return Math.max(0, ...facts.filter((f) => f.taskKey && f.workspaceId === workspaceId).map((f) => Number(f.taskKey!.slice(2))));
   });
@@ -878,7 +879,7 @@ export function createRunManager(deps: RunManagerDeps) {
       JSON.stringify([r.code, r.workspaceId, r.created.map((x) => x.ref), r.updated.map((x) => x.ref), r.unchanged, r.refused.map((x) => [x.ref, x.code])]);
     const started = async () => new Set([...startingTasks.keys(), ...(await taskFacts()).flatMap((f) => (f.taskId ? [f.taskId] : []))]);
     try {
-      const r = await board.importTasks(job, started, shown === "any" ? () => true : shown && ((rows) => rowsOf({ code: null, workspaceId: job.workspaceId, ...rows }) === rowsOf(shown)));
+      const r = await board.importTasks(job, started, shown === "any" ? () => true : shown && ((rows) => rowsOf({ code: null, workspaceId: job.workspaceId, ...rows }) === rowsOf(shown)), begunNow);
       return importReport(file, sha, r.accepted ? "imported" : "checked", job.workspaceId, r.rows);
     } catch (error) {
       const code = (error as { code?: unknown })?.code;
@@ -1109,6 +1110,7 @@ export function createRunManager(deps: RunManagerDeps) {
       if (r.readOnly) refuse(r.readOnly === "newer_version" ? "newer_version" : "damaged", "the board cannot be read");
       const t = r.board.tasks.find((x) => x.id === taskId) ?? refuse("task_not_found", `no task ${taskId}`);
       if (t.archivedAt) refuse("task_archived", "the task is archived");
+      if (t.external) refuse("external_task", "an external task is not split: the person marks it «Done»"); // F2 (T-3)
       if (!t.decompose || t.parentId) refuse("invalid_task", "the task is not marked «Split into subtasks»");
       const facts = await taskFacts();
       if ([...(startingRuns.get(t.id) ?? [])].length || facts.some((f) => f.taskId === t.id && f.status !== "unreadable" && !TERMINAL_STATUSES.includes(f.status))) {
@@ -1165,6 +1167,31 @@ export function createRunManager(deps: RunManagerDeps) {
       }
     }
   }
+  // F2 (T-3, §5.6): «Выполнено» and «Снять отметку» of an external task — the person's decision, written by main alone.
+  // «Выполнено» once its own dependencies are «Done» (deps_not_done); «Снять отметку» while no dependent has begun — a
+  // run, one being made, or a mark of its own (dependents_started). Neither starts, deletes, accepts nor merges anything
+  // the direct dependents of t that have begun — a run, one being made, a split (or one being made), a mark of their own.
+  // Called inside the board's queue: a run of a dependent finished meanwhile is seen (review of F2)
+  const begunOf = (facts: readonly RunTaskFacts[]) => async (b: Board, t: BoardTask): Promise<string[]> => {
+    const st = boardStatuses(b, facts);
+    return b.tasks.filter((x) => x.dependsOn.includes(t.id) && x.workspaceId === t.workspaceId
+      && ((st.get(x.id)?.attempts ?? 0) > 0 || startingTasks.has(x.id) || startingSplits.has(x.id) || facts.some((f) => f.decompositionOf === x.id) || !!x.externalDone)).map((x) => x.key);
+  };
+  const begunNow = async (b: Board, t: BoardTask): Promise<string[]> => begunOf(await taskFacts())(b, t);
+  async function markExternal(taskId: string, done: boolean, note: string | null): Promise<BoardTask> {
+    return board.markExternal(taskId, done, note, async (b, t) => {
+      const facts = await taskFacts(); // inside the queue
+      const st = boardStatuses(b, facts);
+      if ((st.get(t.id)?.attempts ?? 0) > 0) refuse("external_has_runs", `${t.key} has runs of its own: it goes by them`);
+      if (done) {
+        const open = t.dependsOn.map((d) => b.tasks.find((x) => x.id === d)).filter((d): d is BoardTask => !!d && !st.get(d.id)?.done).map((d) => d.key);
+        if (open.length) refuse("deps_not_done", `${t.key} waits for ${open.join(", ")}`);
+      } else {
+        const begun = await begunOf(facts)(b, t);
+        if (begun.length) refuse("dependents_started", `${begun.join(", ")} began after it`);
+      }
+    });
+  }
   // «Accept the result» (owner's decision 2): only of the task's latest run, completed without checks by its journal
   async function acceptTask(taskId: string): Promise<BoardTask> {
     const { board: b } = await board.read();
@@ -1211,6 +1238,8 @@ export function createRunManager(deps: RunManagerDeps) {
       || facts.some((f) => f.taskId === t!.id && f.runId !== runId && f.status !== "unreadable" && !TERMINAL_STATUSES.includes(f.status))) {
       refuse("task_active_run", `${t!.key} has an active run`);
     }
+    // F2 (T-3): an external task is not run — the person marks it; one with runs of its own goes by them
+    if (t!.external && !facts.some((f) => f.taskId === t!.id && f.workspaceId === t!.workspaceId)) refuse("external_task", `${t!.key} is external: a person marks it «Done»`);
     // E2 (stage-e-decomposition.md §3.4): no start of a parent while it is being split — the person's or the autopilot's
     if (decompositionActive(t!, facts)) refuse("decomposition_active", `${t!.key} is being split`);
     // C1: from the board's merged head of the task's place, as it is now; a dependency counts once it is in the head
@@ -1221,10 +1250,12 @@ export function createRunManager(deps: RunManagerDeps) {
       if (anyway) return;
       const into = await merges.mergesInto(h!.ref, source);
       const statuses = boardStatuses(b, facts);
-      const out = t!.dependsOn.map((d) => b.tasks.find((x) => x.id === d)).filter((d): d is BoardTask => !!d)
+      // E2 (§2.2): the dependencies that hold it, as the autopilot's step and boardStatuses take them — an archived subtask does not
+      const out = heldDeps(t!, b.tasks).map((d) => b.tasks.find((x) => x.id === d)!)
         .filter((d) => {
           const run = facts.find((f) => f.runId === statuses.get(d.id)?.current);
           const inFolder = !!run && ((run.workMode !== "copy" && run.workMode !== "worktree") || !!run.taken?.applied); // the head starts from the folder
+          if (statuses.get(d.id)?.done === "external") return false; // F2: a marked external task has no result to wait for
           return !statuses.get(d.id)?.done || (mergeOfTask({ merges: into }, d.id, statuses.get(d.id)?.current ?? null)?.status !== "completed" && !inFolder);
         }).map((d) => d.key);
       if (out.length) refuse("task_not_ready", `${t!.key} waits for ${out.join(", ")} in the board's result: start anyway?`);
@@ -1414,13 +1445,19 @@ export function createRunManager(deps: RunManagerDeps) {
         const t = (await board.read()).board.tasks.find((x) => x.id === id);
         if (t && decompositionActive(t, await taskFacts())) refuse("decomposition_active", `${t.key} is being split`);
       }
-      return board.update(id, patch);
+      return board.update(id, patch, begunNow); // F2: an added dependency of a marked external task (markGoes)
     }),
     boardArchive: (id: string, archived: boolean) => result(() => leaving(id, archived, () => board.archive(id, archived, () => startingTasks.has(id)))),
     // a run being created counts: its journal may not be there yet (stage-b-board.md §3.3)
     boardRemove: (id: string, dependents: string[] = []) => result(() => leaving(id, true,
       () => board.remove(id, async () => startingTasks.has(id) || (await taskFacts()).some((f) => f.taskId === id), dependents))),
     boardAccept: (id: string) => result(() => acceptTask(id)),
+    // F2 (T-3, §5.6): «Выполнено» (with a note) / «Снять отметку» — a new input of stage F (macOS arm64 only)
+    boardExternalMark: (taskId: string, done: boolean, note?: string | null) => result(() => {
+      newInputOk();
+      notOpen();
+      return markExternal(isUuid(taskId) ? taskId : refuse("invalid_argument", "taskId must be a UUID"), done === true, typeof note === "string" ? note : null);
+    }),
     boardPlace: (workspaceId: string, bounds: BoardPlace | null) => result(() => { workspaceOk(workspaceId); return board.place(workspaceId, bounds); }),
     // C1 (stage-c-parallel.md §4): «Объединить», «Объединить все», a paused merge's «Готово, проверить» and «Пропустить»,
     // and the person's actions on the head — never automatic

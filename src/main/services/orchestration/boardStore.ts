@@ -1,12 +1,16 @@
 // The task board's file: <userData>/orchestration/board.json (stage-b-board.md §3). It holds only what the person
-// set — tasks, their order and dependencies, an accepted result — never a status. Written atomically (tmp + rename)
+// set — tasks, their order and dependencies, and the person's decisions: an accepted result («Принять результат»,
+// accepted) and an external task's mark «Выполнено» (F2, externalDone) — never a status. A decision is not a status: the
+// status is worked out from it and the runs by boardStatuses (principle 8), and no edit of this file makes «Done —
+// confirmed by checks». Written atomically (tmp + rename)
 // through one queue; a damaged file is set aside and the board starts empty (runs keep their link to tasks in their
 // goals); a file of a newer version is never written: the board is read only. Builds up to 1.5.13 neither read nor
 // write this file, so a rollback keeps it as it is (canvas.json would not: 1.5.12 writes back only the keys it knows).
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { BOARD_VERSION, SPLIT_TEXT_MAX, subtaskText, type AutopilotBudget, type Board, type BoardPlace, type BoardTask, type BoardTaskInput, type BoardTaskOrigin, type BoardTaskPatch } from "../../../shared/taskBoard.ts";
+import { BOARD_VERSION, SPLIT_TEXT_MAX, subtaskText, type AutopilotBudget, type Board, type BoardExternalDone, type BoardPlace, type BoardTask, type BoardTaskInput, type BoardTaskOrigin, type BoardTaskPatch, type TaskModels } from "../../../shared/taskBoard.ts";
+import { SAFE_MODEL } from "./providers.ts";
 
 class Refusal extends Error {
   readonly code: string;
@@ -33,10 +37,18 @@ const time = (v: unknown) => typeof v === "string" && v.length <= 40 && !Number.
 const isOrigin = (o: Partial<BoardTaskOrigin> | null): boolean => !!o && typeof o === "object" && o.kind === "import"
   && (o.source === null || (typeof o.source === "string" && o.source.length <= 300)) && typeof o.file === "string" && o.file.length >= 1 && o.file.length <= 255
   && typeof o.sha256 === "string" && /^[0-9a-f]{64}$/.test(o.sha256);
+// F2 (T-3, T-4): external, externalDone and models — softly too
+const ROLES = ["lead", "executor", "reviewer"];
+export const isModels = (m: unknown): m is TaskModels => !!m && typeof m === "object" && !Array.isArray(m) && Object.keys(m).length > 0
+  && Object.entries(m).every(([k, v]) => ROLES.includes(k) && typeof v === "string" && SAFE_MODEL.test(v));
+export const NOTE_MAX = 300;
+const isMark = (d: Partial<BoardExternalDone> | null): boolean => !!d && typeof d === "object" && time(d.at) && d.by === "person"
+  && (d.note === null || (typeof d.note === "string" && d.note.length <= NOTE_MAX));
 const soft = (t: unknown): unknown => {
   if (!t || typeof t !== "object") return t;
-  const { ref, origin, ...rest } = t as Record<string, unknown>;
-  return { ...rest, ...(typeof ref === "string" && REF.test(ref) ? { ref } : {}), ...(isOrigin(origin as BoardTaskOrigin) ? { origin } : {}) };
+  const { ref, origin, external, externalDone, models, ...rest } = t as Record<string, unknown>;
+  return { ...rest, ...(typeof ref === "string" && REF.test(ref) ? { ref } : {}), ...(isOrigin(origin as BoardTaskOrigin) ? { origin } : {}),
+    ...(external === true ? { external } : {}), ...(external === true && isMark(externalDone as BoardExternalDone) ? { externalDone } : {}), ...(isModels(models) ? { models } : {}) };
 };
 
 function isTask(t: unknown): t is BoardTask {
@@ -65,6 +77,8 @@ const isBudget = (p: unknown): p is AutopilotBudget => {
 };
 
 export type TaskInput = BoardTaskInput;
+// F2: the keys of the direct dependents of t that have begun (a run, one being made, a split, a mark of their own)
+export type Begun = (b: Board, t: BoardTask) => Promise<string[]>;
 
 // E2 (stage-e-decomposition.md §5): what the creation of subtasks takes from the decomposition run: the proposal's tasks,
 // the number of the requirements of the run's goal and its language
@@ -73,7 +87,9 @@ export interface SplitPlan { criteria: number; language: "ru" | "en"; tasks: Spl
 
 // F1 (stage-f-external-projects.md §5.2): one board-tasks/v1 file, read and checked on its own (boardImport.ts). A row
 // refused there carries its refusal: its dependents are refused with it
-export interface ImportRow { ref: string | null; input: TaskInput | null; deps: string[]; ifAbsent: boolean; refused?: { code: string; detail: string } }
+// fields (F2): external and models of the row, as they are to be stored (absent: taken off an existing task)
+export interface ImportRow { ref: string | null; input: TaskInput | null; deps: string[]; ifAbsent: boolean; refused?: { code: string; detail: string }; fields?: ImportFields }
+export interface ImportFields { external?: true; models?: TaskModels }
 export interface ImportJob { workspaceId: string; origin: BoardTaskOrigin; rows: ImportRow[] }
 export interface ImportRows {
   created: { ref: string; key: string }[]; updated: { ref: string; key: string }[]; unchanged: string[];
@@ -186,9 +202,22 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
   const subtasksOf = (b: Board, id: string) => b.tasks.filter((x) => x.parentId === id && !x.archivedAt);
   // E2 (§6): a marked task leaves 400 characters for the closing run's paragraph
   const markOk = (text: string) => { if (text.length > SPLIT_TEXT_MAX) refuse("text_too_long", `to be split, the text is up to ${SPLIT_TEXT_MAX} characters`); };
+  // F2: the keys of t's direct dependents (of its workspace) that have begun — the caller's facts (manager: a run, one
+  // being made, a split, a mark); without them only what the board itself says (a mark) and the runs started names
+  const begunByBoard = (started: ReadonlySet<string> = new Set()): Begun => async (b, t) =>
+    b.tasks.filter((x) => x.dependsOn.includes(t.id) && x.workspaceId === t.workspaceId && (started.has(x.id) || !!x.externalDone)).map((x) => x.key);
+  // F2 (§14 «F2», proposed by the implementer, for the owner to confirm): the mark «Выполнено» goes when a dependency is
+  // added (a new id in the set) — refused while a direct dependent has begun; a narrower or the same set keeps it
+  const added = (t: BoardTask, dependsOn: readonly string[]): boolean => dependsOn.some((d) => !t.dependsOn.includes(d));
+  async function markGoes(b: Board, t: BoardTask, dependsOn: readonly string[], begun: Begun): Promise<boolean> {
+    if (!t.externalDone || !added(t, dependsOn)) return false;
+    const keys = await begun(b, t);
+    if (keys.length) refuse("dependents_started", `${keys.join(", ")} began after ${t.key} was marked: a new dependency would take the mark off`);
+    return true;
+  }
 
   // F1 (§5.2): what one file would make of the board: every row created, updated, unchanged or refused
-  async function planImport(b: Board, job: ImportJob, started: ReadonlySet<string>): Promise<{ rows: ImportRows; next: Board | null }> {
+  async function planImport(b: Board, job: ImportJob, started: ReadonlySet<string>, begun: Begun = begunByBoard(started)): Promise<{ rows: ImportRows; next: Board | null }> {
     const ws = job.workspaceId;
     const mine = b.tasks.filter((t) => t.workspaceId === ws);
     const onBoard = new Map<string, BoardTask[]>();
@@ -203,7 +232,7 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
     const ids = job.rows.map((r) => (r.ref && onBoard.get(r.ref)?.length === 1 ? onBoard.get(r.ref)![0].id : randomUUID()));
     const idOf = (ref: string) => (inFile.has(ref) ? ids[inFile.get(ref)!] : onBoard.get(ref)?.[0]?.id ?? null);
     const kind = new Map<number, "create" | "update" | "unchanged">();
-    const classify = (r: ImportRow, i: number): void => {
+    const classify = async (r: ImportRow, i: number): Promise<void> => {
       if (refusal.has(i)) return;
       const no = (code: string, detail: string) => { refusal.set(i, { code, detail }); };
       const input = r.input!;
@@ -218,14 +247,20 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       if (r.ifAbsent) return void kind.set(i, "unchanged");
       if (t.project !== input.project) return no("project_changed", `${t.key} is of ${t.project}`);
       const deps = new Set(r.deps.map(idOf));
+      // an external task without criteria in the file carries Loom's one line (readTasksFile): the same as on the board
+      const later = r.fields ?? {};
       const equal = t.title === input.title && t.text === input.text && t.criteria.length === input.criteria.length && t.criteria.every((c, k) => c === input.criteria[k])
-        && deps.size === new Set(t.dependsOn).size && t.dependsOn.every((d) => deps.has(d)) && LATER_FIELDS.every((f) => (t as unknown as Record<string, unknown>)[f] === undefined);
+        && deps.size === new Set(t.dependsOn).size && t.dependsOn.every((d) => deps.has(d))
+        && LATER_FIELDS.every((f) => JSON.stringify(sorted((t as unknown as Record<string, unknown>)[f])) === JSON.stringify(sorted((later as Record<string, unknown>)[f])));
       if (equal) return void kind.set(i, "unchanged");
       if (started.has(t.id)) return no("task_started", `${t.key} has runs`);
       if (t.decompose || t.decomposedBy || subtasksOf(b, t.id).length) return no("task_split", `${t.key} is marked or split into subtasks`);
+      if (r.fields?.external) {
+        try { await markGoes(b, t, [...deps] as string[], begun); } catch (e) { return no((e as Refusal).code ?? "dependents_started", String((e as Error).message)); }
+      }
       kind.set(i, "update");
     };
-    for (const [i, r] of job.rows.entries()) classify(r, i);
+    for (const [i, r] of job.rows.entries()) await classify(r, i);
     // a refusal takes its dependents with it; a cycle refuses every task on it — until nothing more is refused
     const at = new Date().toISOString();
     let tasks: BoardTask[] = b.tasks;
@@ -243,13 +278,16 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
         const k = kind.get(i);
         if (k !== "create" && k !== "update") return;
         const input = r.input!;
-        const own = { title: input.title, text: input.text, criteria: [...input.criteria], dependsOn: r.deps.map((d) => idOf(d)!), origin: job.origin };
+        const own = { title: input.title, text: input.text, criteria: [...input.criteria], dependsOn: r.deps.map((d) => idOf(d)!), origin: job.origin,
+          ...(r.fields?.external ? { external: true as const } : {}), ...(r.fields?.models ? { models: { ...r.fields.models } } : {}) };
         if (k === "create") {
           made.set(ids[i], { id: ids[i], key: "", workspaceId: ws, project: input.project, ...own, order: ++order, createdAt: at, updatedAt: at, archivedAt: null, accepted: null, ref: r.ref! });
           return;
         }
         const t = onBoard.get(r.ref!)![0];
-        const kept = Object.fromEntries(Object.entries(t).filter(([f]) => !LATER_FIELDS.includes(f))) as unknown as BoardTask;
+        // the person's mark goes with the external task: a file that makes it an ordinary one takes the mark off too,
+        // and so does an added dependency (markGoes; a row with begun dependents was refused above)
+        const kept = Object.fromEntries(Object.entries(t).filter(([f]) => !LATER_FIELDS.includes(f) && (f !== "externalDone" || (r.fields?.external && !added(t, own.dependsOn))))) as unknown as BoardTask;
         made.set(t.id, { ...kept, ...own, updatedAt: at });
       });
       tasks = [...b.tasks.map((t) => made.get(t.id) ?? t), ...[...made.values()].filter((t) => t.key === "")];
@@ -299,7 +337,8 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
     }),
 
     // A task's text and requirements may change after runs (decision 4): the runs keep their own goal.
-    update: (id: string, patch: BoardTaskPatch) => change(async (b) => {
+    // begun: t's begun direct dependents, asked inside the queue (manager: its facts; F2, markGoes)
+    update: (id: string, patch: BoardTaskPatch, begun: Begun = begunByBoard()) => change(async (b) => {
       const t = b.tasks.find((x) => x.id === id) ?? refuse("task_not_found", `no task ${id}`);
       // a cycle is checked when the dependencies change: a task on a hand-made cycle can still be renamed (the form
       // sends its dependencies each time: the same set is no change)
@@ -310,6 +349,7 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       let mark: Pick<BoardTask, "decompose" | "decomposedBy"> = { ...(t.decompose ? { decompose: true as const } : {}), ...(t.decomposedBy ? { decomposedBy: t.decomposedBy } : {}) };
       if (patch.decompose === true) {
         if (t.parentId) refuse("invalid_task", "a subtask is not split again");
+        if (t.external) refuse("external_task", "an external task is not split: the person marks it «Done»");
         mark = { ...mark, decompose: true };
       } else if (patch.decompose === false) {
         if (subtasksOf(b, id).length) refuse("has_subtasks", "the task has subtasks");
@@ -317,7 +357,10 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       }
       if (mark.decompose && (patch.text !== undefined || patch.decompose === true)) markOk(ok.text);
       const bare = <T extends object>(o: T): Omit<T, "decompose" | "decomposedBy"> => { const { decompose: _d, decomposedBy: _by, ...r } = o as T & Partial<Pick<BoardTask, "decompose" | "decomposedBy">>; return r; }; // ok carries t's own marks
-      const next: BoardTask = { ...bare(t), ...bare(ok), ...mark, ...(patch.order !== undefined ? { order: patch.order } : {}), updatedAt: new Date().toISOString() };
+      // F2: the mark «Выполнено» was given for the dependencies as they were — one added takes it off (markGoes)
+      const own: Partial<BoardTask> = { ...bare(t), ...bare(ok) };
+      if (await markGoes(b, t, ok.dependsOn, begun)) delete own.externalDone;
+      const next: BoardTask = { ...(own as BoardTask), ...mark, ...(patch.order !== undefined ? { order: patch.order } : {}), updatedAt: new Date().toISOString() };
       return { next: { ...b, tasks: b.tasks.map((x) => (x.id === id ? next : x)) }, value: next };
     }),
 
@@ -380,15 +423,15 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
     // it is then: false — nothing is written (what the person was shown is not what would be written). Without accept
     // it is only the check. started(): the tasks with runs (or a run being created). accepted: the rows were written
     // (all unchanged: nothing to write)
-    importTasks: async (job: ImportJob, started: () => Promise<ReadonlySet<string>>, accept: ((rows: ImportRows) => boolean) | null): Promise<{ rows: ImportRows; accepted: boolean }> => {
+    importTasks: async (job: ImportJob, started: () => Promise<ReadonlySet<string>>, accept: ((rows: ImportRows) => boolean) | null, begun?: Begun): Promise<{ rows: ImportRows; accepted: boolean }> => {
       if (!accept) {
         await queue;
         const r = await load();
         writable(r);
-        return { rows: (await planImport(r.board, job, await started())).rows, accepted: false };
+        return { rows: (await planImport(r.board, job, await started(), begun)).rows, accepted: false };
       }
       return change(async (b) => {
-        const { rows, next } = await planImport(b, job, await started());
+        const { rows, next } = await planImport(b, job, await started(), begun);
         const accepted = accept(rows);
         return { next: accepted ? next : null, value: { rows, accepted } };
       });
@@ -415,6 +458,22 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
       return { next: { ...b, autopilot }, value: null };
     }),
 
+    // F2 (T-3, §5.6): «Выполнено» (done, with an optional note) and «Снять отметку» of an external task — the person's
+    // decision. check(b): the caller's rules against the board as it is in the queue (its own dependencies «Done»,
+    // the dependents not started), the runs read inside the queue too (as remove's hasRuns); it throws its refusal
+    markExternal: (id: string, done: boolean, note: string | null, check: (b: Board, t: BoardTask) => Promise<void>) => change(async (b) => {
+      const t = b.tasks.find((x) => x.id === id) ?? refuse("task_not_found", `no task ${id}`);
+      if (t.archivedAt) refuse("task_archived", "the task is archived");
+      if (!t.external) refuse("invalid_task", "the task is not external");
+      if (note !== null && (typeof note !== "string" || note.length > NOTE_MAX || note.includes("\0"))) refuse("invalid_task", `note: up to ${NOTE_MAX} characters`);
+      if (!done && !t.externalDone) return { next: null, value: t };
+      await check(b, t);
+      const at = new Date().toISOString();
+      const { externalDone: _was, ...rest } = t;
+      const next: BoardTask = { ...rest, ...(done ? { externalDone: { at, by: "person" as const, note: note?.trim() ? note : null } } : {}), updatedAt: at };
+      return { next: { ...b, tasks: b.tasks.map((x) => (x.id === id ? next : x)) }, value: next };
+    }),
+
     // «Accept the result»: the caller has checked that runId is the task's latest run, completed without checks.
     accept: (id: string, runId: string) => change(async (b) => {
       const t = b.tasks.find((x) => x.id === id) ?? refuse("task_not_found", `no task ${id}`);
@@ -425,6 +484,9 @@ export function createBoardStore(file: string, usedKeys: (workspaceId: string) =
     })
   };
 }
+
+// a value with its object keys in order, for the comparison of a field (models)
+const sorted = (v: unknown): unknown => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
 
 // Would `self` be reached from `from` along the dependencies?
 function reaches(b: Board, from: readonly string[], self: string): boolean {

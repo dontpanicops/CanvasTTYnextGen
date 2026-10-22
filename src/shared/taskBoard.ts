@@ -31,8 +31,20 @@ export interface BoardTask {
   // within the workspace) and where it came from. A bad value in the file is dropped, the board is never set aside
   ref?: string;
   origin?: BoardTaskOrigin;
+  // F2 (§6, T-3): an external task — no run of its own; its «Done» is only the person's mark «Выполнено» (externalDone),
+  // a decision of the person kept apart from accepted. A task that has runs of its own goes by them (external_has_runs).
+  // T-4: a role's model of this task over the profile's (no key: the profile's)
+  external?: true;
+  externalDone?: BoardExternalDone;
+  models?: TaskModels;
 }
 export interface BoardTaskOrigin { kind: "import"; source: string | null; file: string; sha256: string }
+export interface BoardExternalDone { at: string; by: "person"; note: string | null }
+export type TaskModels = Partial<Record<"lead" | "executor" | "reviewer", string>>;
+// T-3: the one requirement Loom writes to an external task the file gives none — builds before F2 need ≥1 (isTask)
+export const EXTERNAL_CRITERION = "Отметка человека «Выполнено»";
+// T-3: an external task in force — marked external and never run (one with runs of its own goes by them)
+export const externalInForce = (t: Pick<BoardTask, "external">, s: Pick<TaskStatus, "attempts"> | undefined): boolean => !!t.external && (s?.attempts ?? 0) === 0;
 
 // F1 (§5.4): the report of a board-tasks/v1 file, board-tasks-report/v1
 export interface ImportReport {
@@ -76,7 +88,7 @@ export interface BoardView {
 // done/ at once (invalid_file, refused: shown with its code, no decision). tasks: the file's rows as written there, for
 // the window's list (ref, title, project, dependsOn); [] when the file could not be read
 export interface InboxRow { file: string; sha256: string; workspaceId: string | null; report: ImportReport; tasks: InboxTask[] }
-export interface InboxTask { ref: string; title: string; project: string; dependsOn: string[] }
+export interface InboxTask { ref: string; title: string; project: string; dependsOn: string[]; external?: boolean }
 
 // C2 (owner's decision 12): a person's start of a task that waits for a free place of the project (in main's memory)
 export interface QueuedStart {
@@ -164,7 +176,8 @@ export interface AutopilotState {
   on: boolean;
   budget: AutopilotBudget;
   used: { runs: number; minutes: number };
-  waits: string | null; // on, and waiting: for what (a run, the person, provider_limit)
+  waits: string | null; // on, and waiting: for what (a run, the person, provider_limit; F2: external)
+  waitsKey?: string | null; // F2 (T-3): with waits "external" — the key of the external task it waits to be marked
   stop: AutopilotStop | null;
   // C4 (stage-c4-limits.md §2): the provider's limit it waits for (the earliest known reset), and its last continuation
   limit?: AutopilotLimit | null;
@@ -241,11 +254,14 @@ export type TaskReason =
   | "run_unreadable" | "waits_permission" | "waits_answer" | "waits_decision" | "limit_reached" | "waits_task"
   | "waits_result" | "waits_merge" | "waits_head" | "last_stopped" | "last_failed" | "no_checks" | "stopping" | "run_newer" | "paused_other"
   // E2 (stage-e-decomposition.md §2.1): a parent task
-  | "decomposing" | "decomposition_paused" | "decomposition_failed" | "subtasks_gone";
+  | "decomposing" | "decomposition_paused" | "decomposition_failed" | "subtasks_gone"
+  // F2 (stage-f-external-projects.md §6): waits for the person's mark of an external task; an external task with runs
+  | "waits_external" | "external_has_runs";
 
 export interface TaskStatus {
   column: TaskColumn;
-  done: "confirmed" | "accepted" | null; // «Done» confirmed by checks, or accepted by the person without checks
+  // «Done» confirmed by checks, accepted by the person without checks, or (F2) an external task the person marked «Выполнено»
+  done: "confirmed" | "accepted" | "external" | null;
   reason: TaskReason | null;
   waitsFor: string[]; // the keys of the tasks it waits for (waits_task, waits_result, waits_merge)
   cycle: boolean; // waits_task because its dependencies make a cycle (a hand-edited board.json)
@@ -256,7 +272,8 @@ export interface TaskStatus {
   // «waits_result» (a result where this task would not see it), or null — ready. main refuses a start without «Start
   // anyway» unless it is null; the board offers «Start» or «Start anyway» by it.
   // C2: «waits_head» — a dependency «Done» and not in the board's merged head of the place yet (decision 9)
-  depsWait: { reason: "waits_task" | "waits_result" | "waits_merge" | "waits_head"; waitsFor: string[]; cycle: boolean } | null;
+  // F2: «waits_external» — every dependency not «Done» is an external task not marked yet
+  depsWait: { reason: "waits_task" | "waits_result" | "waits_merge" | "waits_head" | "waits_external"; waitsFor: string[]; cycle: boolean } | null;
   // B3 (§4.2): a «Done» task on a dependency that is not «Done» now — never rolled back, only said: «changed» (it was
   // «Done» when this task's run started, then lost it), «not_ready» (it was not: this task was started anyway). It goes
   // on to the tasks after it. Recomputing a result is stage D.
@@ -370,8 +387,18 @@ function parentStatus(task: BoardTask, s: TaskStatus, splits: readonly RunTaskFa
   }
 }
 
-// A task by its own runs only.
-export function own(task: Pick<BoardTask, "accepted">, runs: readonly RunTaskFacts[]): TaskStatus {
+// A task by its own runs only. F2 (T-3): an external task without runs — «Done» only by the person's mark; one with runs
+// goes by them, said so (external_has_runs) where its runs leave no reason of their own
+export function own(task: Pick<BoardTask, "accepted"> & Partial<Pick<BoardTask, "external" | "externalDone">>, runs: readonly RunTaskFacts[]): TaskStatus {
+  if (task.external && !runs.length) {
+    const marked = !!task.externalDone;
+    return { attempts: 0, waitsFor: [], cycle: false, depsWait: null, depsNote: null, current: null, completion: null, reason: null,
+      column: marked ? "done" : "queue", done: marked ? "external" : null };
+  }
+  const s = byRuns(task, runs);
+  return task.external && !s.done && !s.reason ? { ...s, reason: "external_has_runs" } : s;
+}
+function byRuns(task: Pick<BoardTask, "accepted">, runs: readonly RunTaskFacts[]): TaskStatus {
   const sorted = [...runs].sort((a, b) => a.createdAt - b.createdAt || a.runId.localeCompare(b.runId));
   const base = { attempts: sorted.length, waitsFor: [] as string[], cycle: false, done: null, depsWait: null, depsNote: null };
   const current = sorted.at(-1);
@@ -381,7 +408,7 @@ export function own(task: Pick<BoardTask, "accepted">, runs: readonly RunTaskFac
   if (current.newer) return { ...head, column: "queue", reason: "run_newer" };
   if (current.status === "unreadable") {
     // the column of the last run that can be read, the reason of this one
-    const prev = readable ? own({ accepted: null }, [readable]) : null;
+    const prev = readable ? byRuns({ accepted: null }, [readable]) : null;
     return { ...head, column: prev?.column === "done" ? "review" : prev?.column ?? "queue", reason: "run_unreadable" };
   }
   const phase: TaskColumn = current.phase === "review" ? "review" : "work";
@@ -408,9 +435,13 @@ export function own(task: Pick<BoardTask, "accepted">, runs: readonly RunTaskFac
 
 // What a task's dependencies make it wait for: the tasks not «Done», then a result that is not where a dependent task
 // would see it (stage-b-board.md §5.2, the base rule); null — ready.
-function dependencies(deps: readonly (readonly [BoardTask, TaskStatus])[], runsOf: Map<string, RunTaskFacts[]>, head?: BoardHead): TaskStatus["depsWait"] {
-  const notDone = deps.filter(([, d]) => !isDone(d)).map(([t]) => t.key);
-  if (notDone.length) return { reason: "waits_task", waitsFor: notDone, cycle: false };
+function dependencies(all: readonly (readonly [BoardTask, TaskStatus])[], runsOf: Map<string, RunTaskFacts[]>, head?: BoardHead): TaskStatus["depsWait"] {
+  const open = all.filter(([, d]) => !isDone(d));
+  // F2 (T-3): only external tasks not marked yet — the person's mark, not a run, is what it waits for
+  if (open.length) return { reason: open.every(([t, d]) => externalInForce(t, d)) ? "waits_external" : "waits_task", waitsFor: open.map(([t]) => t.key), cycle: false };
+  // F2: a marked external task has no result anywhere — nothing to see, nothing to merge
+  const deps = all.filter(([, d]) => d.done !== "external");
+  if (!deps.length) return null;
   // C2 (decision 9): with the board's merged head, a dependency counts once its current result is in it — or in the
   // working folder (it worked there, or was applied), which the head started from; no merge is left to the person
   // A dependency of another project never gets into this head: B's rule for it
@@ -449,7 +480,7 @@ function noteOf(task: BoardTask, s: TaskStatus, deps: readonly (readonly [BoardT
 
 // Where a dependency's result is for a task after it: in the project folder (it worked there, or its result was applied),
 // in a branch of the project only («Create a branch»), or not taken at all.
-function resultOf(run: RunTaskFacts | undefined): "folder" | "branch" | "none" {
+export function resultOf(run: RunTaskFacts | undefined): "folder" | "branch" | "none" {
   if (!run || (run.workMode !== "copy" && run.workMode !== "worktree") || run.taken?.applied) return "folder";
   return run.taken?.branch && run.taken.commit ? "branch" : "none";
 }
@@ -461,7 +492,9 @@ function resultOf(run: RunTaskFacts | undefined): "folder" | "branch" | "none" {
 export function startBase(task: Pick<BoardTask, "id" | "dependsOn" | "workspaceId" | "project">, board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>,
   facts: readonly RunTaskFacts[], heads: readonly BoardHead[]): { branch: string; commit: string; key: string } | null {
   const head = heads.find((h) => h.workspaceId === task.workspaceId && h.project === task.project);
-  const inFolder = heldDeps(task, board.tasks).some((id) => resultOf(facts.find((f) => f.runId === statuses.get(id)?.current)) === "folder" && statuses.get(id)?.done);
+  // F2: a marked external task has no result: it says nothing of where to start from
+  const inFolder = heldDeps(task, board.tasks).some((id) => resultOf(facts.find((f) => f.runId === statuses.get(id)?.current)) === "folder"
+    && !!statuses.get(id)?.done && statuses.get(id)?.done !== "external");
   return head && !inFolder ? { branch: head.ref, commit: head.commit, key: "T-0" } : baseOf(task, board, statuses, facts);
 }
 
@@ -491,7 +524,8 @@ export function nextTask(board: Pick<Board, "tasks">, statuses: ReadonlyMap<stri
   return board.tasks.filter((t) => {
     const s = statuses.get(t.id);
     // a dependency «Done» on a shaky base (its own dependency changed, or it was started anyway) is the person's call
-    return t.workspaceId === at.workspaceId && t.project === at.project && !t.archivedAt && s?.column === "queue" && s.reason === null && s.attempts === 0
+    // F2 (T-3): an external task is never started — the person marks it
+    return t.workspaceId === at.workspaceId && t.project === at.project && !t.archivedAt && !t.external && s?.column === "queue" && s.reason === null && s.attempts === 0
       && !heldDeps(t, board.tasks).some((d) => statuses.get(d)?.depsNote) && !notYetSplit(t, s) && !parentArchived(t, board.tasks);
   }).sort((a, b) => a.order - b.order)[0] ?? null;
 }
@@ -526,13 +560,14 @@ export function profileGoal(profile: Pick<OrchestrationProjectProfile, "checks" 
 }
 
 // The goal of a task's start by the autopilot: the task's text and requirements, the settings as they are, in the
-// autopilot mode, from the base its dependency left (owner's decision 11).
-export function goalFor(task: Pick<BoardTask, "id" | "key" | "ref" | "text" | "criteria" | "decompose" | "decomposedBy">, profile: Pick<OrchestrationProjectProfile, "checks" | "workMode" | "finish" | "models">,
+// autopilot mode, from the base its dependency left (owner's decision 11). F2 (T-4): the task's own model of a role over
+// the profile's — passed, as the profile's, only with journal v2 (optionalChecks)
+export function goalFor(task: Pick<BoardTask, "id" | "key" | "ref" | "text" | "criteria" | "decompose" | "decomposedBy"> & Partial<Pick<BoardTask, "models">>, profile: Pick<OrchestrationProjectProfile, "checks" | "workMode" | "finish" | "models">,
   opts: { optionalChecks: boolean; language: "ru" | "en"; base: OrchestrationBaseRef | null; tasks?: readonly BoardTask[] }): OrchestrationGoalInput {
   const p = profileGoal(profile);
   const finish = p.workMode !== "copy" && p.finish.commit ? { finish: p.finish } : {};
   return {
-    ...(opts.optionalChecks ? { models: p.models } : {}),
+    ...(opts.optionalChecks ? { models: { ...p.models, ...(task.models ?? {}) } } : {}),
     text: taskText(task, opts.tasks ?? [], opts.language), criteria: [...task.criteria], checks: [], commands: p.commands, workMode: p.workMode, mode: "autopilot", reviewPlan: false,
     language: opts.language, task: { id: task.id, key: task.key, ...(task.ref ? { ref: task.ref } : {}) }, ...finish, limits: {},
     ...(opts.base && (p.workMode === "copy" || p.workMode === "worktree") ? { base: opts.base } : {})
@@ -640,18 +675,18 @@ function ownSplits(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], 
 }
 
 // E3 (§7): the first parent of the place to split: marked, not split, not a subtask, never tried, its dependencies ready,
-// and no decomposition of it at all (a retry is the person's)
-function decomposeCandidate(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string }): BoardTask | null {
+// and no decomposition of it at all (a retry is the person's). F2 (T-3): never an external task
+export function decomposeCandidate(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string }): BoardTask | null {
   return board.tasks.filter((t) => {
     const s = statuses.get(t.id);
-    return t.workspaceId === at.workspaceId && t.project === at.project && t.decompose && !t.decomposedBy && !t.parentId && !t.archivedAt
+    return t.workspaceId === at.workspaceId && t.project === at.project && t.decompose && !t.decomposedBy && !t.parentId && !t.archivedAt && !t.external
       && s?.column === "queue" && s.reason === null && s.attempts === 0 && s.depsWait === null && !heldDeps(t, board.tasks).some((d) => statuses.get(d)?.depsNote)
       && !facts.some((f) => f.decompositionOf === t.id && f.workspaceId === t.workspaceId);
   }).sort((a, b) => a.order - b.order)[0] ?? null;
 }
 
 export type AutopilotStep =
-  | { kind: "wait"; why: string; limit?: AutopilotLimit }
+  | { kind: "wait"; why: string; limit?: AutopilotLimit; key?: string } // F2: why "external" — key: the external task it waits for
   | { kind: "resume"; runId: string; key: string; provider: string } // C4: continue its own run after the limit's reset
   | { kind: "take"; runId: string; key: string }
   | { kind: "start"; task: BoardTask; base: OrchestrationBaseRef | null }
@@ -708,6 +743,8 @@ export function autopilotStep(board: Pick<Board, "tasks">, facts: readonly RunTa
   if (!next) {
     const idle = idleOf(board, statuses, at);
     if (idle.allDone) return { kind: "off", code: "all_done", detail: null, key: null };
+    const external = externalWait(board, statuses, at);
+    if (external) return { kind: "wait", why: "external", key: external };
     const detail = idle.waiting.map((w) => (w.waitsFor.length ? `${w.key} (${w.reason}: ${w.waitsFor.join(", ")})` : `${w.key} (${w.reason ?? "-"})`)).join("; ");
     return { kind: "off", code: "others_wait", detail, key: null, waiting: idle.waiting };
   }
@@ -838,7 +875,7 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   const next = place.filter((t) => {
     const s = statuses.get(t.id);
     const held = heldDeps(t, board.tasks); // E2 (§2.2): an archived subtask does not hold its parent
-    if (!s || t.archivedAt || s.column !== "queue" || s.attempts !== 0 || held.some((d) => statuses.get(d)?.depsNote) || notYetSplit(t, s) || parentArchived(t, board.tasks)) return false;
+    if (!s || t.archivedAt || t.external || s.column !== "queue" || s.attempts !== 0 || held.some((d) => statuses.get(d)?.depsNote) || notYetSplit(t, s) || parentArchived(t, board.tasks)) return false;
     if (!held.length) return s.reason === null;
     return held.every((d) => !board.tasks.some((x) => x.id === d) || (statuses.get(d)?.done && (inHead(d) || resultIn(d))));
   }).sort((a, b) => a.order - b.order)[0] ?? null;
@@ -852,8 +889,38 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   if (goingOn || next || split || person) return { kind: "wait", why: person ?? "run" };
   const idle = idleOf(board, statuses, at);
   if (idle.allDone) return { kind: "off", code: "all_done", detail: null, key: null };
+  const external = externalWait(board, statuses, at);
+  if (external) return { kind: "wait", why: "external", key: external };
   const detail = idle.waiting.map((w) => (w.waitsFor.length ? `${w.key} (${w.reason}: ${w.waitsFor.join(", ")})` : `${w.key} (${w.reason ?? "-"})`)).join("; ");
   return { kind: "off", code: "others_wait", detail, key: null, waiting: idle.waiting };
+}
+
+// F2 (T-3): nothing goes on and nothing waits for the person, and every task of the place left waits — itself or along
+// its dependencies — only for external tasks not marked yet: the autopilot waits for the mark (no run, no minutes)
+// instead of turning off. The key: the first external task it waits for (its own dependencies «Done»: it can be marked)
+export function externalWait(board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string }): string | null {
+  const byId = new Map(board.tasks.map((t) => [t.id, t]));
+  const memo = new Map<string, string | null>();
+  const waitsOn = (t: BoardTask): string | null => {
+    if (memo.has(t.id)) return memo.get(t.id)!;
+    memo.set(t.id, null); // a cycle waits for nobody's mark
+    const s = statuses.get(t.id);
+    const open = heldDeps(t, board.tasks).map((d) => byId.get(d)!).filter((d) => !statuses.get(d.id)?.done);
+    let key: string | null = null;
+    // an archived task is marked by nobody (task_archived): waiting for it would never end
+    if (s && !s.done && !s.cycle && !t.archivedAt) {
+      const along = open.map(waitsOn);
+      const chain = along.length > 0 && along.every((k) => k !== null) ? along[0] : null;
+      if (externalInForce(t, s)) key = open.length ? chain : t.key;
+      else if (s.column === "queue" && s.attempts === 0 && (s.reason === "waits_external" || s.reason === "waits_task")) key = chain;
+    }
+    memo.set(t.id, key);
+    return key;
+  };
+  const left = board.tasks.filter((t) => t.workspaceId === at.workspaceId && t.project === at.project && !t.archivedAt && !statuses.get(t.id)?.done)
+    .sort((a, b) => a.order - b.order);
+  const keys = left.map(waitsOn);
+  return keys.length && keys.every((k) => k !== null) ? keys[0] : null;
 }
 
 // C2 (stage-c-parallel.md §4.7): the tasks of a place that may touch the same files — a warning on their cards, never a
@@ -896,7 +963,7 @@ export function overlapsOf(board: Pick<Board, "tasks">, facts: readonly RunTaskF
     const going = !!run && !run.newer && !OVER.has(run.status) && (run.status !== "completed"
       || (!!head && isCopy(run.workMode) && run.board === head.ref && !run.taken?.applied && (!merge || ["preparing", "running", "paused"].includes(merge.status))));
     if (going) side = { t, files: [...(run!.files ?? []), ...(run!.named ?? []), ...named], going: true };
-    else if (!run && s.column === "queue") side = { t, files: named, going: false };
+    else if (!run && s.column === "queue" && !t.external) side = { t, files: named, going: false }; // F2: an external task changes no file
     if (!side?.files.length) continue;
     const k = `${t.workspaceId}\0${t.project}`;
     places.set(k, [...(places.get(k) ?? []), side]);

@@ -415,6 +415,13 @@ export function registerOrchestrationIpc(handleMain: Handle, manager: RunManager
   handleMain(IPC.orchestrationBoardRemove, (_e, id: unknown, dependents: unknown) => checked(
     () => [uuid(id, "id"), dependents === undefined ? [] : uuids(dependents, "dependents")] as [string, string[]], manager.boardRemove));
   handleMain(IPC.orchestrationBoardAccept, (_e, id: unknown) => checked(() => [uuid(id, "id")] as [string], manager.boardAccept));
+  // F2 (§5.6): «Выполнено» with an optional note (up to 300) and «Снять отметку» of an external task
+  handleMain(IPC.orchestrationBoardExternalMark, (_e, taskId: unknown, done: unknown, note: unknown) => checked(() => {
+    if (typeof done !== "boolean") bad("done must be a boolean");
+    if (note !== undefined && note !== null && (typeof note !== "string" || note.length > 300 || note.includes("\0"))) bad("note must be up to 300 characters");
+    if (!done && typeof note === "string") bad("a note goes with «Done» only");
+    return [uuid(taskId, "taskId"), done as boolean, typeof note === "string" ? note : null] as [string, boolean, string | null];
+  }, manager.boardExternalMark));
   handleMain(IPC.orchestrationBoardPlace, (_e, workspaceId: unknown, bounds: unknown) => checked(() => {
     if (bounds === null) return [str(workspaceId, "workspaceId", 64), null] as [string, null];
     const o = obj(bounds, "bounds", ["position", "size"]);

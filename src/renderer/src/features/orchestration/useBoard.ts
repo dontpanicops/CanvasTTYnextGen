@@ -81,6 +81,8 @@ export function useBoard(orch: Orchestration) {
     archive: (id: string, archived: boolean) => act(() => api.boardArchive(id, archived)),
     remove: (id: string, dependents: string[] = []) => act(() => api.boardRemove(id, dependents)),
     accept: (id: string) => act(() => api.boardAccept(id)),
+    // F2 (T-3): «Выполнено» (an optional note) / «Снять отметку» of an external task
+    external: (id: string, done: boolean, note?: string) => act(() => api.boardExternalMark(id, done, note)),
     place: (workspaceId: string, bounds: SessionBounds | null) => act(() => api.boardPlace(workspaceId, bounds)),
     autopilot: (linkId: string, on: boolean, language: "ru" | "en") => act(() => api.boardAutopilot(linkId, on, language)),
     budget: (linkId: string, budget: AutopilotBudget | null) => act(() => api.boardBudget(linkId, budget)),
