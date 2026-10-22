@@ -1847,6 +1847,11 @@ false`, `SHELL` — оболочка с журналом строк) и `window.
   частями; флейков не было); `npm run typecheck` чист; `npm run lint:ci` — 267 предупреждений, как на main; `npm run build`
   прошёл. Smoke после сборки: `smoke-board-f3-ui` 41/41 (66 подставных процессов CLI, 8 fetch), `smoke-board-ui` 43/43,
   `smoke-board-f2-ui` 29/29.
+- **Утверждено владельцем 2026-10-22 (PR #88):** `waits_mr` от любой обычной «Готово» зависимости, в том числе с
+  результатом «в папке»; `git fetch --no-tags` для базы; отказ `remote_base_dialog` до очереди старта; «Разбить»
+  отказано и при создании, задаче с отметкой до `runBase` — «Делать целиком»; `GIT_SSH_COMMAND` с BatchMode,
+  ConnectTimeout=15 и ServerAlive для `ls-remote` и fetch, только без своей команды ssh человека. Остальные пункты
+  «на утверждение владельцу» выше остаются открытыми.
 
 ### F4 — push, MR, ревью, MCP
 
