@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { LocaleId, NotificationSettings } from "../../../../shared/contracts";
 import { t } from "../../lib/i18n";
 import { NOTIFIED_KEY, NOTIFY_UNAVAILABLE_KEY, boardHeadNotes, boardNotes, notifyStep, pruneNotified, splitNotes, type Note } from "./notify";
-import type { AutopilotState, BoardHead, BoardView } from "../../../../shared/taskBoard";
+import { boardOptsOf, type AutopilotState, type BoardHead, type BoardView } from "../../../../shared/taskBoard";
 import type { RunActivityState, RunState } from "./useOrchestration";
 
 const store = {
@@ -25,7 +25,7 @@ export function useRunNotifications({ locale, prefs, runs, activity, title, open
   accepting?: number; // the board's tasks waiting for «Accept the result» (counted on the badge)
   autopilot?: Record<string, AutopilotState>; boardPlace?(linkId: string): string; // B4: the board's autopilot of each link
   heads?: BoardHead[]; // C4: the board's merged heads (their merges waiting for the person, the head moving)
-  board?: Pick<BoardView, "board" | "facts"> | null; // E4: the decomposition runs wait for the person (their own notes and badge, not the runs')
+  board?: Pick<BoardView, "board" | "facts" | "remoteBase" | "issueRequired"> | null; // E4: the decomposition runs wait for the person (their own notes and badge, not the runs')
 }): { banner: Note[]; openNote(runId: string): void; dismiss(runId: string): void } {
   const notified = useRef<Record<string, string> | null>(null);
   const badge = useRef<number | null>(null);
@@ -43,7 +43,7 @@ export function useRunNotifications({ locale, prefs, runs, activity, title, open
     const step = notifyStep(locale, list, notified.current, prefs, focused, true, accepting);
     const board = boardNotes(locale, autopilot, step.notified, prefs, focused, boardPlace);
     const head = boardHeadNotes(locale, heads, autopilot, board.notified, prefs, focused, projectName);
-    const split = boardView ? splitNotes(locale, boardView.board, boardView.facts, heads, head.notified, prefs, focused, projectName) : { notes: [], notified: head.notified, waiting: 0 };
+    const split = boardView ? splitNotes(locale, boardView.board, boardView.facts, heads, head.notified, prefs, focused, projectName, boardOptsOf(boardView)) : { notes: [], notified: head.notified, waiting: 0 };
     step.notes.push(...board.notes, ...head.notes, ...split.notes);
     notified.current = split.notified;
     store.write(split.notified);

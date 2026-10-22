@@ -29,6 +29,18 @@ const line = (v: unknown, what: string, max = 1000): string => {
 const REL = /^(?![/~])(?!.*(?:^|\/)\.\.(?:\/|$))[^\0\r\n]{1,300}$/; // a path inside the work folder
 const GIT_NAME = /^(?!-)[A-Za-z0-9._/-]{1,200}$/; // a remote or branch name, never an option
 const MAX_GRANTS = 200;
+// F3 (T-6): a branch name the application writes — checkFinish's rule (GIT_NAME, no ".."); git's own check-ref-format
+// --branch is asked where git is (saveProfile, the start)
+export const gitNameOk = (name: string): boolean => GIT_NAME.test(name) && !name.includes("..");
+
+// F3 (T-6): the profile's branch template of a board task's worktree branch. {ref} of a task without one is its key
+export const BRANCH_FIELDS: readonly string[] = ["issue", "ref", "run8"];
+export const templateFields = (template: string): string[] => [...template.matchAll(/\{([^{}]*)\}/g)].map((m) => m[1]!);
+export const templateNeedsIssue = (template: string | undefined): boolean => !!template && templateFields(template).includes("issue");
+export const fillBranch = (template: string, v: { issue: string; ref: string; run8: string }): string =>
+  template.replace(/\{(issue|ref|run8)\}/g, (_, f: "issue" | "ref" | "run8") => v[f]);
+// the values a template is tried with when the profile is saved (the literal part is what can be wrong)
+export const PROBE_FIELDS = { issue: "ISSUE-1", ref: "T1", run8: "0123abcd" };
 
 export function validateProfile(input: unknown): OrchestrationProjectProfile {
   const p = input as Partial<OrchestrationProjectProfile> | null;
@@ -65,11 +77,40 @@ export function validateProfile(input: unknown): OrchestrationProjectProfile {
   }
   if (!Array.isArray(p!.grants) || p!.grants.length > MAX_GRANTS) bad(`grants: up to ${MAX_GRANTS}`);
   const grants = p!.grants!.map(validGrant);
+  const branchTemplate = validTemplate(p!.branchTemplate, p!.workMode!);
+  const runBase = validRunBase(p!.runBase, p!.workMode!);
   return {
     v: 1, workMode: p!.workMode!, checks, prepare: { steps, auto: prep!.auto }, env: { direnv: p!.env!.direnv },
     access: { claude: access.claude, codex: access.codex }, ...(models ? { models } : {}), finish: { commit: f!.commit, push, qa }, grants,
-    savedAt: typeof p!.savedAt === "string" ? p!.savedAt : null
+    savedAt: typeof p!.savedAt === "string" ? p!.savedAt : null,
+    ...(branchTemplate ? { branchTemplate } : {}), ...(runBase ? { runBase } : {})
   };
+}
+
+// F3 (T-6): absent, null or "" — none. Worktree only; known substitutions only; {ref} or {run8} in it; the name it makes
+// passes the application's rule with the probe values (git's check-ref-format: saveProfile)
+function validTemplate(t: unknown, workMode: OrchestrationProjectProfile["workMode"]): string | null {
+  if (t === undefined || t === null || t === "") return null;
+  const no = (code: string, m: string): never => { throw new ProfileError(code, m); };
+  if (workMode !== "worktree") no("work_mode_not_worktree", "branchTemplate: the worktree mode only");
+  if (typeof t !== "string" || t.length > 200) no("branch_template_invalid", "branchTemplate: up to 200 characters");
+  const template = t as string;
+  const unknown = templateFields(template).find((f) => !BRANCH_FIELDS.includes(f));
+  if (unknown !== undefined) no("branch_template_unknown", `branchTemplate: unknown substitution: {${unknown}}`);
+  if (!templateFields(template).some((f) => f === "ref" || f === "run8")) no("branch_template_invalid", "branchTemplate needs {ref} or {run8}");
+  if (/[^A-Za-z0-9._/-]/.test(template.replace(/\{(issue|ref|run8)\}/g, "")) || !gitNameOk(fillBranch(template, PROBE_FIELDS))) {
+    no("branch_template_invalid", "branchTemplate: letters, digits and . _ / - besides the substitutions");
+  }
+  return template;
+}
+
+// F3 (T-13a): absent or null — none. Worktree only (remote_base_mode); remoteUrl is main's (saveProfile reads it)
+function validRunBase(r: unknown, workMode: OrchestrationProjectProfile["workMode"]): OrchestrationProjectProfile["runBase"] | null {
+  if (r === undefined || r === null) return null;
+  const o = r as Record<string, unknown>;
+  if (typeof o !== "object" || Array.isArray(o) || typeof o.remote !== "string" || typeof o.branch !== "string" || !gitNameOk(o.remote) || !gitNameOk(o.branch)) bad("runBase: remote and branch names");
+  if (workMode !== "worktree") throw new ProfileError("remote_base_mode", "runBase: the worktree mode only");
+  return { remote: o.remote as string, branch: o.branch as string, remoteUrl: typeof o.remoteUrl === "string" ? o.remoteUrl.slice(0, 500) : null };
 }
 
 // The model of each role (null: as in the CLI). Absent, or every role as in the CLI, is not kept.

@@ -3,12 +3,13 @@
 // «Take the result → Create a branch» when a task became «Done» (owner's decision 8), a dependent copy from that branch
 // (decision 11). It answers no question and passes no right on: a permission request is a wait (§5.3).
 // Whether it is on lives here only: a restart of the application turns it off.
-import type { OrchestrationGoalInput, OrchestrationProjectProfile, OrchestrationReadiness, OrchestrationResult, OrchestrationTakeOutcome } from "../../../shared/orchestration.ts";
+import type { OrchestrationBaseRef, OrchestrationGoalInput, OrchestrationProjectProfile, OrchestrationReadiness, OrchestrationResult, OrchestrationTakeOutcome } from "../../../shared/orchestration.ts";
 import {
   activeMs, autopilotParallelStep, autopilotStep, goalFor, isCopy,
   type AutopilotBudget, type AutopilotLimit, type BoardHead, type AutopilotState, type AutopilotStop, type AutopilotStopCode, type AutopilotWaiting, type Board,
-  type LimitedRun, type RunTaskFacts
+  type LimitedRun, type PlaceOpts, type RunTaskFacts
 } from "../../../shared/taskBoard.ts";
+import { templateNeedsIssue } from "./profile.ts";
 
 type R<T> = OrchestrationResult<T>;
 type Records = { ts: string; type: string; data: Record<string, unknown> }[];
@@ -36,6 +37,9 @@ export interface BoardAutopilotDeps {
   resolutionLimits?(workspaceId: string, project: string): Promise<{ runId: string; key: string; provider: string; resetsAt: number | null }[]>;
   // E3 (stage-e-decomposition.md §7): the decomposition run of a parent (main's startDecomposition)
   decompose?(taskId: string, language: "ru" | "en"): Promise<R<{ runId: string }>>;
+  // F3 (T-13b, §7.2): the base at the profile's runBase — its fetch addresses checked, the branch fetched, its commit
+  // ({ branch: "<remote>/<branch>", commit, key: "remote" }); base_fetch_failed, base_remote_mismatch, remote_url_unreadable
+  remoteBase?(project: string): Promise<R<OrchestrationBaseRef>>;
   newId(): string;
   now(): number;
 }
@@ -56,6 +60,9 @@ interface Live {
   notReady: string | null; // F2: the task whose start was refused task_not_ready once — a second refusal in a row turns it off
   waits: string | null;
   waitsKey: string | null; // F2: the external task it waits to be marked
+  // F3 (T-13b, О3): the remote base fetched for the start of one task, kept only while that start waits (link_busy):
+  // the task and its place's external marks it was fetched with — another task or a mark given or taken off fetches again
+  base: { taskId: string; marks: string; ref: OrchestrationBaseRef } | null;
   // C4: its continuations of a run in a row (reset once a turn of it completes), the reset each was for
   resumes: Map<string, { n: number; reset: number | null; turns: number }>;
   limit: AutopilotLimit | null;
@@ -63,10 +70,16 @@ interface Live {
   busy: boolean;
 }
 
-// §5.1: the settings a start takes, and the project's saved permissions — any change turns the autopilot off
-const fingerprint = (p: OrchestrationProjectProfile): string => JSON.stringify({
+// §5.1: the settings a start takes, and the project's saved permissions — any change turns the autopilot off.
+// F3 (§7.3): the branch template and the remote base too (absent: not in the string — a profile without them prints as before)
+export const fingerprint = (p: OrchestrationProjectProfile): string => JSON.stringify({
   access: p.access, workMode: p.workMode, models: p.models ?? null, finish: p.finish, checks: p.checks, prepare: p.prepare, env: p.env,
-  grants: p.grants.map((g) => `${g.provider}:${g.kind}:${g.fingerprint}`).sort()
+  grants: p.grants.map((g) => `${g.provider}:${g.kind}:${g.fingerprint}`).sort(),
+  branchTemplate: p.branchTemplate, runBase: p.runBase
+});
+// F3 (T-13a): the place's options from its profile (F4 adds pushFields)
+export const placeOptsOf = (p: Pick<OrchestrationProjectProfile, "runBase" | "branchTemplate">): PlaceOpts => ({
+  ...(p.runBase ? { remoteBase: true } : {}), ...(templateNeedsIssue(p.branchTemplate) ? { issueRequired: true } : {})
 });
 
 // C4: the turns of a run that completed (a run that got past its limit completed one since)
@@ -151,16 +164,20 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
     const profile = await deps.profile(at.project);
     const { board, facts } = await deps.view();
     if (live.get(linkId) !== l) return; // turned off meanwhile
-    // C1: a separate copy goes with N slots and the board's merged head (C2: a worktree too); the project folder as in B
-    const head = isCopy(profile.workMode) ? await deps.head(at.workspaceId, at.project) : null;
+    // C1: a separate copy goes with N slots and the board's merged head (C2: a worktree too); the project folder as in B.
+    // F3 (T-13a): with a remote base there is no board's result: none is read
+    const opts = placeOptsOf(profile);
+    const head = isCopy(profile.workMode) && !opts.remoteBase ? await deps.head(at.workspaceId, at.project) : null;
     const limited = await limitedRuns(l, board, facts, at);
     const now = deps.now();
     const next = isCopy(profile.workMode)
-      ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head, l.refused, limited, now, l.splits)
+      ? autopilotParallelStep(board, facts, at, l.started, await used(l, head), await budgetOf(linkId), head, l.refused, limited, now, l.splits, opts)
       : autopilotStep(board, facts, { ...at, workMode: profile.workMode }, l.started.at(-1) ?? null, await used(l, null), await budgetOf(linkId), limited, now, l.splits);
     l.waits = next.kind === "wait" ? next.why : null;
     l.waitsKey = next.kind === "wait" ? next.key ?? null : null;
     l.limit = next.kind === "wait" ? next.limit ?? null : null;
+    // F3 (О3): the fetched base lives only while the start of this one task waits — any other step drops it
+    if (next.kind !== "start" || l.base?.taskId !== next.task.id) l.base = null;
     if (next.kind === "wait") return;
     if (next.kind === "resume") {
       const r = await deps.resume?.(next.runId) ?? { ok: false as const, code: "resume_unavailable", message: "" };
@@ -223,7 +240,20 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       return added.length ? off(linkId, "grant_added", added.map((g) => `${g.provider}: ${g.summary}`).join("; "), next.task.key)
         : off(linkId, "settings_changed", null, next.task.key);
     }
-    const goal = goalFor(next.task, profile, { optionalChecks: deps.optionalChecks, language: l.language, base: next.base, tasks: board.tasks });
+    // F3 (T-13b): at a remote base the base is the remote branch fetched now (kept while this start waits, О3)
+    let base = next.base;
+    if (opts.remoteBase) {
+      const marks = JSON.stringify(board.tasks.filter((t) => t.external && t.workspaceId === at.workspaceId && t.project === at.project).map((t) => [t.id, !!t.externalDone]));
+      if (!l.base || l.base.marks !== marks) {
+        l.base = null;
+        const r = await deps.remoteBase?.(at.project) ?? { ok: false as const, code: "base_fetch_failed", message: "unavailable" };
+        if (live.get(linkId) !== l) return;
+        if (!r.ok) return r.code === "base_fetch_failed" || r.code === "base_remote_mismatch" ? off(linkId, r.code, r.message, next.task.key) : off(linkId, "start_failed", r.code, next.task.key);
+        l.base = { taskId: next.task.id, marks, ref: r.value };
+      }
+      base = l.base.ref;
+    }
+    const goal = goalFor(next.task, profile, { optionalChecks: deps.optionalChecks, language: l.language, base, tasks: board.tasks });
     if (!l.pending) {
       const ready = await deps.readiness({ linkId, commands: goal.commands ?? [], workMode: profile.workMode, ...(goal.models ? { models: goal.models } : {}) });
       if (!ready.ok && LATER.has(ready.code)) { l.waits = "run"; return; }
@@ -244,14 +274,18 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       // decided again once per task — refused again, the step and the start's check disagree, and it stops
       if (r.code === "task_not_ready") {
         if (l.notReady === next.task.id) return off(linkId, "start_failed", r.code, next.task.key);
-        l.notReady = next.task.id; l.pending = null; l.waits = "run"; return;
+        l.notReady = next.task.id; l.pending = null; l.base = null; l.waits = "run"; return;
       }
-      const raced = next.base?.key === "T-0" && (r.code === "invalid_base" || r.code === "task_active_run");
+      // F3 (T-13b): the remote branch moved after this fetch (another link fetched it) — fetched again on the next step.
+      // By the goal's own base, not the step's
+      const raced = (goal.base?.key === "T-0" || goal.base?.key === "remote") && (r.code === "invalid_base" || r.code === "task_active_run");
+      if (raced) l.base = null;
       if (LATER.has(r.code) || raced) { l.pending = null; l.waits = "run"; return; }
       return off(linkId, "start_failed", r.code, next.task.key);
     }
     l.pending = null;
     l.notReady = null;
+    l.base = null; // О3: the next start fetches anew
     l.started.push(r.value.runId);
   }
 
@@ -263,7 +297,7 @@ export function createBoardAutopilot(deps: BoardAutopilotDeps, budgetOf: (linkId
       const at = await deps.link(linkId);
       if (!at) throw Object.assign(new Error("no such link"), { code: "link_not_found" });
       const profile = await deps.profile(at.project);
-      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], splits: [], refused: new Set(), pending: null, notReady: null, waits: null, waitsKey: null, busy: false, resumes: new Map(), limit: null, resumed: null });
+      live.set(linkId, { language, workspaceId: at.workspaceId, project: at.project, since: deps.now(), merges: new Set(), print: fingerprint(profile), grants: profile.grants, started: [], agents: [], splits: [], refused: new Set(), pending: null, notReady: null, base: null, waits: null, waitsKey: null, busy: false, resumes: new Map(), limit: null, resumed: null });
       stops.delete(linkId);
       // the first step on the next beat; the timer alone never keeps the process up
       timer ??= setInterval(() => { for (const id of live.keys()) void tick(id); }, tickMs);

@@ -25,7 +25,7 @@ export function taskLine(locale: LocaleId, status: TaskStatus, run: RunInput | n
     const d = status.split?.detail ?? "";
     return tr(locale, `boardReason_${status.reason}`, { detail: splitWhy(locale, d), reason: pauseWord(locale, d) });
   }
-  if (status.reason) return tr(locale, `boardReason_${status.reason}`, { keys, n: status.attempts });
+  if (status.reason) return tr(locale, `boardReason_${status.reason}`, { keys, n: status.attempts, field: "issue" }); // F3: issue is the only field a template can miss
   if (status.column === "queue" && status.split?.detail === "whole") return notSplit(locale);
   if (run && (status.column === "work" || status.column === "review")) return runStatus(locale, { ...run, stageTitles: null, now: Date.now() }).doing;
   return t(locale, "boardNotStarted");
@@ -48,7 +48,7 @@ export const unsplit = (task: Pick<BoardTask, "decompose" | "decomposedBy">, st:
   !!task.decompose && !task.decomposedBy && st.split?.detail !== "whole";
 export type SplitAction = "run" | "again" | "whole" | "open" | "answer";
 // The person's actions on a parent's card by its row of §2.1. A parent with a run of its own or with subtasks is an ordinary task.
-export function splitActions(task: Pick<BoardTask, "decompose" | "parentId" | "decomposedBy">, st: TaskStatus): SplitAction[] {
+export function splitActions(task: Pick<BoardTask, "decompose" | "parentId" | "decomposedBy">, st: TaskStatus, remoteBase = false): SplitAction[] {
   if (!task.decompose || task.parentId || st.attempts > 0) return [];
   const open: SplitAction[] = st.split ? ["open"] : [];
   switch (st.reason) {
@@ -58,6 +58,8 @@ export function splitActions(task: Pick<BoardTask, "decompose" | "parentId" | "d
     default:
       if (st.split) return open; // «whole»: started as an ordinary task
       if (task.decomposedBy) return []; // subtasks exist: an ordinary task waiting for them
+      // F3: at a remote base nothing is split, so a waiting dependency does not hide «Do it whole»
+      if (remoteBase && unsplit(task, st) && st.column === "queue" && (!st.reason || st.depsWait)) return ["whole"];
       return st.column === "queue" && !st.reason && !st.depsWait ? ["run"] : [];
   }
 }
@@ -98,6 +100,6 @@ export function askCount(entries: readonly OrchestrationActivityEntry[]): number
 
 // B4: why the board's autopilot stopped, in the person's words (the tasks it left waiting with their own reasons)
 export function stopText(locale: LocaleId, stop: AutopilotStop): string {
-  const waiting = (stop.waiting ?? []).map((w) => `${w.key} — ${w.reason ? tr(locale, `boardReason_${w.reason}`, { keys: w.waitsFor.join(", "), n: 0, detail: "", reason: "" }).replace(/:\s*$/, "") : t(locale, "boardNotStarted")}`).join("; ");
+  const waiting = (stop.waiting ?? []).map((w) => `${w.key} — ${w.reason ? tr(locale, `boardReason_${w.reason}`, { keys: w.waitsFor.join(", "), n: 0, detail: "", reason: "", field: "issue" }).replace(/:\s*$/, "") : t(locale, "boardNotStarted")}`).join("; ");
   return tr(locale, `boardApStop_${stop.code}`, { key: stop.key ?? "", detail: stop.detail ?? "", waiting });
 }

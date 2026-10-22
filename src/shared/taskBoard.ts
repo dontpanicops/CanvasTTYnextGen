@@ -37,6 +37,10 @@ export interface BoardTask {
   external?: true;
   externalDone?: BoardExternalDone;
   models?: TaskModels;
+  // F3 (T-6, T-7): the task's external id for the profile's branch template ({issue}; Loom does not read it) and its
+  // commit's title (one line ≤72, in place of the text's first line)
+  issue?: string;
+  commitTitle?: string;
 }
 export interface BoardTaskOrigin { kind: "import"; source: string | null; file: string; sha256: string }
 export interface BoardExternalDone { at: string; by: "person"; note: string | null }
@@ -82,7 +86,23 @@ export interface BoardView {
   heads?: BoardHead[]; // C1: the board's merged head of each workspace and project that has one
   queued?: QueuedStart[]; // C2 (owner's decision 12): task starts waiting for a free place, in order
   inbox?: InboxRow[]; // F1 (stage-f-external-projects.md §5.4): the files of inbox/ as main last checked them
+  // F3 (T-13a): the places (workspaceId\0project, as heads) whose profile has a remote base (runBase), and whose branch
+  // template needs the task's issue ({issue}); every screen passes them to boardStatuses (boardOptsOf)
+  remoteBase?: string[];
+  issueRequired?: string[];
 }
+
+// F3 (T-13a): the options of one place, from its profile — the last parameter of autopilotParallelStep (F4 adds pushFields)
+export interface PlaceOpts { remoteBase?: boolean; issueRequired?: boolean }
+// the same for every place at once: sets of place keys
+export interface BoardOpts { remoteBase?: ReadonlySet<string>; issueRequired?: ReadonlySet<string> }
+export const placeKey = (p: { workspaceId: string; project: string }): string => `${p.workspaceId}\0${p.project}`;
+export const placeOpts = (at: { workspaceId: string; project: string }, o: PlaceOpts): BoardOpts => ({
+  ...(o.remoteBase ? { remoteBase: new Set([placeKey(at)]) } : {}), ...(o.issueRequired ? { issueRequired: new Set([placeKey(at)]) } : {})
+});
+export const boardOptsOf = (v: Pick<BoardView, "remoteBase" | "issueRequired">): BoardOpts => ({
+  ...(v.remoteBase?.length ? { remoteBase: new Set(v.remoteBase) } : {}), ...(v.issueRequired?.length ? { issueRequired: new Set(v.issueRequired) } : {})
+});
 
 // F1 (§5.4, §5.6): a file of <userData>/orchestration/inbox/ — checked (waits for «Import» / «Reject»), or set aside to
 // done/ at once (invalid_file, refused: shown with its code, no decision). tasks: the file's rows as written there, for
@@ -169,7 +189,7 @@ export const conflictsOf = (b: AutopilotBudget): "agent" | "person" => (b.confli
 export const parallelOf = (b: AutopilotBudget): number => (Number.isInteger(b.parallel) && b.parallel! >= 1 && b.parallel! <= 4 ? b.parallel! : AUTOPILOT_PARALLEL);
 export type AutopilotStopCode = "all_done" | "others_wait" | "budget_runs" | "budget_minutes" | "run_stopped" | "run_failed" | "limit_reached"
   | "run_paused" | "run_unreadable" | "settings_changed" | "grant_added" | "not_ready" | "take_failed" | "start_failed" | "worktree_base" | "link_gone" | "task_gone"
-  | "head_moved" | "merge_failed" | "resume_failed" | "decomposition_failed";
+  | "head_moved" | "merge_failed" | "resume_failed" | "decomposition_failed" | "base_fetch_failed" | "base_remote_mismatch";
 export interface AutopilotWaiting { key: string; reason: TaskReason | null; waitsFor: string[] }
 export interface AutopilotStop { code: AutopilotStopCode; detail: string | null; key: string | null; at: string; waiting?: AutopilotWaiting[] }
 export interface AutopilotState {
@@ -256,7 +276,10 @@ export type TaskReason =
   // E2 (stage-e-decomposition.md §2.1): a parent task
   | "decomposing" | "decomposition_paused" | "decomposition_failed" | "subtasks_gone"
   // F2 (stage-f-external-projects.md §6): waits for the person's mark of an external task; an external task with runs
-  | "waits_external" | "external_has_runs";
+  | "waits_external" | "external_has_runs"
+  // F3 (T-13a, T-6): with a remote base, a direct dependency on an ordinary task (its MR is not merged yet); the branch
+  // template needs the task's issue and it has none
+  | "waits_mr" | "branch_template_field";
 
 export interface TaskStatus {
   column: TaskColumn;
@@ -273,7 +296,8 @@ export interface TaskStatus {
   // anyway» unless it is null; the board offers «Start» or «Start anyway» by it.
   // C2: «waits_head» — a dependency «Done» and not in the board's merged head of the place yet (decision 9)
   // F2: «waits_external» — every dependency not «Done» is an external task not marked yet
-  depsWait: { reason: "waits_task" | "waits_result" | "waits_merge" | "waits_head" | "waits_external"; waitsFor: string[]; cycle: boolean } | null;
+  // F3: «waits_mr» — with a remote base, a dependency «Done» that is an ordinary task (not an external one marked)
+  depsWait: { reason: "waits_task" | "waits_result" | "waits_merge" | "waits_head" | "waits_external" | "waits_mr"; waitsFor: string[]; cycle: boolean } | null;
   // B3 (§4.2): a «Done» task on a dependency that is not «Done» now — never rolled back, only said: «changed» (it was
   // «Done» when this task's run started, then lost it), «not_ready» (it was not: this task was started anyway). It goes
   // on to the tasks after it. Recomputing a result is stage D.
@@ -309,7 +333,11 @@ export const holds = (t: Pick<BoardTask, "id">, d: Pick<BoardTask, "archivedAt" 
 export const heldDeps = (t: Pick<BoardTask, "id" | "dependsOn">, tasks: readonly BoardTask[]): string[] =>
   t.dependsOn.filter((d) => holds(t, tasks.find((x) => x.id === d)));
 
-export function boardStatuses(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], heads: readonly BoardHead[] = []): Map<string, TaskStatus> {
+// F3 (T-13a): opts — the places with a remote base (their heads are not read: a dependency counts once «Done» and its
+// result is where the base is, which an ordinary task's never is before its MR is merged — waits_mr; an external task
+// waits only for its own dependencies «Done»), and the places whose branch template needs the task's issue
+// (branch_template_field on a task in the queue without one). No opts: as before
+export function boardStatuses(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], heads: readonly BoardHead[] = [], opts: BoardOpts = {}): Map<string, TaskStatus> {
   const byId = new Map(board.tasks.map((t) => [t.id, t]));
   const depsOf = (t: BoardTask) => t.dependsOn.filter((d) => holds(t, byId.get(d)));
   const runsOf = new Map<string, RunTaskFacts[]>();
@@ -340,14 +368,18 @@ export function boardStatuses(board: Pick<Board, "tasks">, facts: readonly RunTa
     const task = byId.get(id)!;
     const mine = own(task, runsOf.get(id) ?? []);
     // a task off every cycle depends only on tasks off cycles or on them (never recursed into): this ends
+    const remote = !!opts.remoteBase?.has(placeKey(task));
     const depsWait: TaskStatus["depsWait"] = onCycle.has(id)
       ? { reason: "waits_task", cycle: true, waitsFor: depsOf(task).filter((d) => onCycle.has(d)).map((d) => byId.get(d)!.key) }
-      : dependencies(depsOf(task).map((d) => [byId.get(d)!, statusOf(d)] as const), runsOf,
-        heads.find((h) => h.workspaceId === task.workspaceId && h.project === task.project));
+      : remote ? remoteDependencies(task, depsOf(task).map((d) => [byId.get(d)!, statusOf(d)] as const))
+        : dependencies(depsOf(task).map((d) => [byId.get(d)!, statusOf(d)] as const), runsOf,
+          heads.find((h) => h.workspaceId === task.workspaceId && h.project === task.project));
     let s: TaskStatus = { ...mine, depsWait };
     if (s.done && !onCycle.has(id)) s = { ...s, depsNote: noteOf(task, s, depsOf(task).map((d) => [byId.get(d)!, statusOf(d)] as const), runsOf) };
     // the queue shows what it waits for; a task at work or in review keeps its run's reason
     else if (depsWait && s.column === "queue" && s.reason !== "run_newer") s = { ...s, reason: depsWait.reason, waitsFor: depsWait.waitsFor, cycle: depsWait.cycle };
+    // T-6: a task the branch template cannot name (no issue) — said where nothing else holds it
+    if (!s.done && s.column === "queue" && s.reason === null && !task.external && !task.issue && opts.issueRequired?.has(placeKey(task))) s = { ...s, reason: "branch_template_field" };
     if (task.decompose && s.attempts === 0) s = parentStatus(task, s, splitsOf.get(id) ?? [], board.tasks);
     out.set(id, s);
     return s;
@@ -465,6 +497,18 @@ function dependencies(all: readonly (readonly [BoardTask, TaskStatus])[], runsOf
   return null;
 }
 
+// F3 (T-13a, О4): a place with a remote base — the base is the remote's branch, which holds a dependency's result only
+// after its MR is merged: an ordinary task «Done» is waited for (waits_mr) — the person's external «MR merged» task stands
+// for it. An external task waits only for its own dependencies «Done». ponytail: every ordinary dependency, of this
+// project or another, is waits_mr — a result in the working folder (a run in it, an applied one) is no more on the remote
+function remoteDependencies(task: Pick<BoardTask, "external">, all: readonly (readonly [BoardTask, TaskStatus])[]): TaskStatus["depsWait"] {
+  const open = all.filter(([, d]) => !isDone(d));
+  if (open.length) return { reason: open.every(([t, d]) => externalInForce(t, d)) ? "waits_external" : "waits_task", waitsFor: open.map(([t]) => t.key), cycle: false };
+  if (task.external) return null;
+  const ordinary = all.filter(([, d]) => d.done !== "external").map(([t]) => t.key);
+  return ordinary.length ? { reason: "waits_mr", waitsFor: ordinary, cycle: false } : null;
+}
+
 // A «Done» task's dependencies now: one not «Done» was «Done» by a run before this task's run started (it changed after),
 // or it never was (this task was started anyway); a dependency's own note goes on to the tasks after it.
 function noteOf(task: BoardTask, s: TaskStatus, deps: readonly (readonly [BoardTask, TaskStatus])[], runsOf: Map<string, RunTaskFacts[]>): TaskStatus["depsNote"] {
@@ -520,12 +564,13 @@ const notYetSplit = (t: BoardTask, s: TaskStatus): boolean => !!t.decompose && !
 // E3 (§2.2): a subtask whose parent is in the archive is not taken (a missing parent: taken)
 const parentArchived = (t: Pick<BoardTask, "parentId">, tasks: readonly BoardTask[]): boolean => !!t.parentId && !!tasks.find((x) => x.id === t.parentId)?.archivedAt;
 
-export function nextTask(board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string }): BoardTask | null {
+// F3 (T-6): opts.issueRequired — a task without its issue is never taken (the branch template cannot name it)
+export function nextTask(board: Pick<Board, "tasks">, statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string }, opts: PlaceOpts = {}): BoardTask | null {
   return board.tasks.filter((t) => {
     const s = statuses.get(t.id);
     // a dependency «Done» on a shaky base (its own dependency changed, or it was started anyway) is the person's call
     // F2 (T-3): an external task is never started — the person marks it
-    return t.workspaceId === at.workspaceId && t.project === at.project && !t.archivedAt && !t.external && s?.column === "queue" && s.reason === null && s.attempts === 0
+    return t.workspaceId === at.workspaceId && t.project === at.project && !t.archivedAt && !t.external && !(opts.issueRequired && !t.issue) && s?.column === "queue" && s.reason === null && s.attempts === 0
       && !heldDeps(t, board.tasks).some((d) => statuses.get(d)?.depsNote) && !notYetSplit(t, s) && !parentArchived(t, board.tasks);
   }).sort((a, b) => a.order - b.order)[0] ?? null;
 }
@@ -541,8 +586,9 @@ export function idleOf(board: Pick<Board, "tasks">, statuses: ReadonlyMap<string
 // Owner's decision 8: in the board's autopilot, a task that became «Done» (confirmed or accepted) gets its result taken
 // as a branch in the project — the safe action that touches no working folder. Nothing to do for a run in the project
 // folder (its changes are there) or one whose result is in a branch already. The call is B4's.
-export function autoTakeOnDone(status: TaskStatus, run: Pick<RunTaskFacts, "runId" | "workMode" | "taken"> | undefined): "branch" | null {
-  if (!status.done || !run || run.runId !== status.current) return null;
+// F3 (T-13a, T-6): with a remote base no take — the run's branch carries its commit already
+export function autoTakeOnDone(status: TaskStatus, run: Pick<RunTaskFacts, "runId" | "workMode" | "taken"> | undefined, opts: PlaceOpts = {}): "branch" | null {
+  if (opts.remoteBase || !status.done || !run || run.runId !== status.current) return null;
   if (run.workMode !== "copy" && run.workMode !== "worktree") return null;
   return run.taken?.branch ? null : "branch";
 }
@@ -675,8 +721,11 @@ function ownSplits(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], 
 }
 
 // E3 (§7): the first parent of the place to split: marked, not split, not a subtask, never tried, its dependencies ready,
-// and no decomposition of it at all (a retry is the person's). F2 (T-3): never an external task
-export function decomposeCandidate(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string }): BoardTask | null {
+// and no decomposition of it at all (a retry is the person's). F2 (T-3): never an external task. F3 (T-13c): none at a
+// remote base (remote_base_mode)
+export function decomposeCandidate(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], statuses: ReadonlyMap<string, TaskStatus>, at: { workspaceId: string; project: string },
+  opts: PlaceOpts = {}): BoardTask | null {
+  if (opts.remoteBase) return null;
   return board.tasks.filter((t) => {
     const s = statuses.get(t.id);
     return t.workspaceId === at.workspaceId && t.project === at.project && t.decompose && !t.decomposedBy && !t.parentId && !t.archivedAt && !t.external
@@ -701,6 +750,8 @@ export function autopilotStep(board: Pick<Board, "tasks">, facts: readonly RunTa
   // C4 (§2.1): a run of the place at a provider's limit comes before anything else — no new task meanwhile
   const limits = limitStep(limited, now);
   if (limits) return limits;
+  // F3 (T-13a): no place options here — the project folder takes neither a remote base (remote_base_mode) nor a branch
+  // template (work_mode_not_worktree): the profile refuses both
   const statuses = boardStatuses(board, facts);
   // E3 (§7): its own decomposition run first: one at a time, nothing else runs while it goes on
   const sp = ownSplits(board, facts, splits, limited);
@@ -775,10 +826,15 @@ const MERGE_ACTIVE = new Set(["preparing", "running"]);
 // C2: a worktree goes as a separate copy does — its own folder, from the head, merged into it
 export const isCopy = (mode: OrchestrationWorkMode | null | undefined): boolean => mode === "copy" || mode === "worktree";
 // refused (C3): merges the application would not hand to an agent (a lock file, not from the head, …): the person's
+// opts (F3, T-13a): the place's options from its profile. remoteBase — no head (head is null), so no head, merge, agent
+// or merge_wait step and no take; a task starts with base null (main puts the remote's branch in, T-13b); a direct
+// dependency on an ordinary task holds it (waits_mr). issueRequired — a task without its issue is skipped
+// (branch_template_field), with dependencies or without
 export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readonly RunTaskFacts[], at: { workspaceId: string; project: string },
-  started: readonly string[], used: { runs: number; ms: number }, budget: AutopilotBudget, head: BoardHead | null, refused: ReadonlySet<string> = new Set(),
-  limited: readonly LimitedRun[] = [], now = Date.now(), splits: readonly string[] = []): AutopilotParallelStep {
-  const statuses = boardStatuses(board, facts, head ? [head] : []);
+  started: readonly string[], used: { runs: number; ms: number }, budget: AutopilotBudget, given: BoardHead | null, refused: ReadonlySet<string> = new Set(),
+  limited: readonly LimitedRun[] = [], now = Date.now(), splits: readonly string[] = [], opts: PlaceOpts = {}): AutopilotParallelStep {
+  const head = opts.remoteBase ? null : given;
+  const statuses = boardStatuses(board, facts, head ? [head] : [], placeOpts(at, opts));
   const place = board.tasks.filter((t) => t.workspaceId === at.workspaceId && t.project === at.project);
   const mergeOf = (taskId: string) => mergeOfTask(head, taskId, statuses.get(taskId)?.current ?? null);
   const inHead = (taskId: string) => mergeOf(taskId)?.status === "completed";
@@ -804,7 +860,7 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
     } else if (run.status !== "completed") { if (run.halted) halt ??= { code: "run_paused", detail: run.reason, key }; }
     else if (s.reason === "no_checks") person ??= "accept";
     else if (!s.done) halt ??= { code: "run_paused", detail: run.reason, key };
-    else if (autoTakeOnDone(s, run) === "branch") return { kind: "take", runId: run.runId, key };
+    else if (autoTakeOnDone(s, run, opts) === "branch") return { kind: "take", runId: run.runId, key };
   }
   // E3 (stage-e-decomposition.md §7): its own decomposition runs, as the runs it started
   if (splits.some((id) => !facts.some((f) => f.runId === id))) return { kind: "wait", why: "run" }; // its journal is not there yet: no second split of the parent
@@ -831,9 +887,9 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   // what is «Done», started from this head and not in it yet: the oldest first (reconciliation, §4.5)
   const pending = place.map((t) => ({ t, s: statuses.get(t.id)!, run: facts.find((f) => f.runId === statuses.get(t.id)?.current) }))
     .filter(({ t, s, run }) => s.done && run && head && run.board === head.ref && isCopy(run.workMode) && !mergeOf(t.id)
-      && (run.taken?.commit || autoTakeOnDone(s, run) === "branch"))
+      && (run.taken?.commit || autoTakeOnDone(s, run, opts) === "branch"))
     .sort((a, b) => a.run!.createdAt - b.run!.createdAt);
-  const take = pending.find(({ s, run }) => autoTakeOnDone(s, run) === "branch");
+  const take = pending.find(({ s, run }) => autoTakeOnDone(s, run, opts) === "branch");
   if (take) return { kind: "take", runId: take.run!.runId, key: take.t.key };
   const ready = pending.find(({ run }) => run!.taken?.commit);
   // a stop takes no new task, but what is «Done» still goes into the head; not onto a head moved by someone else
@@ -865,7 +921,7 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
   // is in the working folder (it worked there, or was applied) — the head starts from that folder. ponytail: a folder
   // result that came after the head started is not in it; «Начать новый итог доски» takes it in
   // E3 (§7): a parent ready to split goes before the ordinary start: a slot and the budget as for a start
-  const split = decomposeCandidate(board, facts, statuses, at);
+  const split = decomposeCandidate(board, facts, statuses, at, opts);
   if (split && busy < parallelOf(budget) && !retrying) {
     if (used.runs >= budget.runs) return goingOn ? { kind: "wait", why: "run" } : { kind: "off", code: "budget_runs", detail: String(budget.runs), key: null };
     if (used.ms >= budget.minutes * 60_000) return goingOn ? { kind: "wait", why: "run" } : { kind: "off", code: "budget_minutes", detail: String(budget.minutes), key: null };
@@ -876,13 +932,17 @@ export function autopilotParallelStep(board: Pick<Board, "tasks">, facts: readon
     const s = statuses.get(t.id);
     const held = heldDeps(t, board.tasks); // E2 (§2.2): an archived subtask does not hold its parent
     if (!s || t.archivedAt || t.external || s.column !== "queue" || s.attempts !== 0 || held.some((d) => statuses.get(d)?.depsNote) || notYetSplit(t, s) || parentArchived(t, board.tasks)) return false;
-    if (!held.length) return s.reason === null;
+    // F3 (T-6): the branch template cannot name it — with dependencies too, by the task itself (a held task's status may
+    // carry another reason); T-13a: with a remote base the statuses say all
+    if (opts.issueRequired && !t.issue) return false;
+    if (!held.length || opts.remoteBase) return s.reason === null;
     return held.every((d) => !board.tasks.some((x) => x.id === d) || (statuses.get(d)?.done && (inHead(d) || resultIn(d))));
   }).sort((a, b) => a.order - b.order)[0] ?? null;
   // a merge's checks wait to be retried while the project is quiet: no new task meanwhile (§2.3)
   if (next && busy < parallelOf(budget) && !retrying) {
     if (used.runs >= budget.runs) return goingOn ? { kind: "wait", why: "run" } : { kind: "off", code: "budget_runs", detail: String(budget.runs), key: null };
     if (used.ms >= budget.minutes * 60_000) return goingOn ? { kind: "wait", why: "run" } : { kind: "off", code: "budget_minutes", detail: String(budget.minutes), key: null };
+    if (opts.remoteBase) return { kind: "start", task: next, base: null };
     if (!head) return { kind: "head" };
     return { kind: "start", task: next, base: { branch: head.ref, commit: head.commit, key: "T-0" } };
   }

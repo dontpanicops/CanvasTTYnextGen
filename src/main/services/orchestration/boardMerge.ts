@@ -39,6 +39,8 @@ export interface BoardMergeDeps {
   shell(project: string): Promise<{ shell: string; env: Record<string, string> }>; // the login shell of the project
   launch(): SupervisorLaunch;
   quiet(project: string): Promise<boolean>; // no run of the project is in a turn now (the retry of failed checks)
+  // F3 (T-13c): the project's base is a remote branch (its profile's runBase) — no board's result is made there
+  remoteBase?(project: string): Promise<boolean>;
   retryWaitMs?: number; // the longest wait for quiet before the retry (10 min)
   retryPollMs?: number;
   changed?(): void; // something to show changed
@@ -132,6 +134,9 @@ export function createBoardMerge(deps: BoardMergeDeps) {
 
   // HOME of the application's Git here: an empty folder of its own (temporary indexes of a head's start live in it)
   let home: Promise<string> | null = null;
+  const noRemoteBase = async (project: string): Promise<void> => {
+    if (await deps.remoteBase?.(project)) refuse("remote_base_mode", "the project's base is a remote branch: it has no board's result");
+  };
   async function withRepo<T>(project: string, fn: (r: BoardRepo) => Promise<T>): Promise<T> {
     home ??= mkdtemp(join(tmpdir(), "raoden-board-"));
     return fn(await openBoardRepo(project, deps.gitPath(), await home));
@@ -365,6 +370,7 @@ export function createBoardMerge(deps: BoardMergeDeps) {
       if (!source && !OID.test(input.commit)) return reject(new Refusal("invalid_argument", "commit"));
       // recovery first, outside this queue: it queues its own work there
       void recovered().then(() => inQueue(Q(input.workspaceId, input.project), async () => {
+        await noRemoteBase(input.project); // F3 (T-13c): a merge begun before runBase was set does not go on at a remote base
         const h = await head(input.workspaceId, input.project) ?? refuse("no_head", "the board has no merged head");
         // a head's ref is named per repository (refs/raoden/board/<workspace>/<n>): two projects of a workspace may share it
         const open = (await all()).find((m) => m.board === h.ref && m.goal.project === input.project && !["completed", "stopped", "failed"].includes(m.status));
@@ -416,13 +422,13 @@ export function createBoardMerge(deps: BoardMergeDeps) {
       return (await all()).some((m) => m.goal.project === real && (m.status === "preparing" || m.status === "running"));
     },
     // the head of a place, started from the working folder if it has none (§4.1)
-    ensureHead: (workspaceId: string, project: string) => inQueue(Q(workspaceId, project), () => withRepo(project, async (r) =>
-      (await boardRefs(r, workspaceId)).at(-1) ?? { n: 1, ...(await startBoardRef(r, workspaceId, 1)) })),
+    ensureHead: async (workspaceId: string, project: string) => { await noRemoteBase(project); return inQueue(Q(workspaceId, project), () => withRepo(project, async (r) =>
+      (await boardRefs(r, workspaceId)).at(-1) ?? { n: 1, ...(await startBoardRef(r, workspaceId, 1)) })); },
     // «Начать новую общую вершину»: the next n, from the working folder; the old one stays for history
-    newHead: (workspaceId: string, project: string) => inQueue(Q(workspaceId, project), () => withRepo(project, async (r) => {
+    newHead: async (workspaceId: string, project: string) => { await noRemoteBase(project); return inQueue(Q(workspaceId, project), () => withRepo(project, async (r) => {
       const n = ((await boardRefs(r, workspaceId)).at(-1)?.n ?? 0) + 1;
       return { n, ...(await startBoardRef(r, workspaceId, n)) };
-    })),
+    })); },
 
     // The heads of these places with the merges into each (the newest first)
     async heads(places: readonly { workspaceId: string; project: string }[]): Promise<BoardHead[]> {

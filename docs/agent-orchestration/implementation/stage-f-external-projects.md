@@ -4,7 +4,7 @@
 §1 (в том числе О1–О5 и В6 по ревью ревизии 3, О6–О8 по ревью ревизии 4); открытых вопросов нет, В6 закрыт (§13). Решено: состав и порядок
 F0 → F1 → F2 → F3 → F4 → Проба (§11), форматы `board-tasks/v1` и `board-review/v1` (проверка схем — полный JSON Schema,
 О1), профиль проекта (§7), совместимость (§9). Сделано: F0 пройден на 1.5.16–1.5.20 (результат — §9), F1 — импорт,
-форматы, строка роли, F2 — внешние задачи и модель на задачу (§14); результаты по подэтапам пишутся в §14.
+форматы, строка роли, F2 — внешние задачи и модель на задачу, F3 — T-13a, T-6, T-7, T-13b, T-13c и smoke (§14); результаты в §14.
 
 Этап F учит доску вести задачу внешнего проекта до merge request: задачи приходят файлом `tasks.json` (формат
 `board-tasks/v1`, публичная схема в docs Loom, §5), автопилот берёт их по одной и доводит каждую до MR: ветка по шаблону
@@ -235,7 +235,7 @@ F0 → F1 → F2 → F3 → F4 → Проба (§11), форматы `board-task
   тест с `leftOut` ≠ ∅ (T-6, T-13a, §7.2).
 - С2.4 — см. К2.3.
 - С2.5 — адреса fetch проверяются отдельно (`git remote get-url --all`), не `remoteUrlsMatch` (тому нужны и адреса push);
-  тест с `pushurl` ≠ `url`; полученная база переиспользуется 60 с на место, без fetch каждые 1,5 с, пока старт ждёт
+  тест с `pushurl` ≠ `url`; кэш базы — только на ожидание старта одной задачи, без срока (О3), без fetch каждые 1,5 с, пока старт ждёт
   `link_busy` (T-13b).
 - С2.6 — защищённый список замораживается в `goal.finish.push.protected` при старте, `checkFinish` его сохраняет, push
   сверяется с замороженным; тест «список изменён» убран (T-8).
@@ -517,7 +517,7 @@ T-13c, порядок F3 — **T-13a, T-6, T-7, T-13b, T-13c**: объект о�
 | **T-9** | Выгрузка ревью (§8): main при старте запуска задачи доски ставит в цель `goal.export: true`, если в профиле `reviewExport` (ключа нет в `parseGoal` — из окна он невозможен, `invalid_argument`). Выгрузку пишет отдельная функция «дописать выгрузку» `writeReviewExport(runId)` (новый файл src/main/services/orchestration/reviewExport.ts): single-flight по `runId`, вне кэша фактов (`taskFacts` её не вызывает). Она вызывается, когда запуск стал `completed`, и один раз при старте приложения для каждого завершённого запуска с `goal.export` и без каталога `export/`. Запись идемпотентна и атомарна (временный каталог рядом и `rename`), поэтому падение между «завершён» и файлами исправляет вызов при старте приложения; упавший и остановленный запуск выгрузки не получают; находки после завершения не меняются (решения человека принимаются до завершения [П]), повторной выгрузки нет. Каждый завершённый запуск задачи получает свою выгрузку (по `runId`). Данные задачи — с доски как есть (архивная задача сохраняет `title` и `issue`); задача, удалённая с доски, — из цели (`goal.task.key`, `ref`), `title` и `issue` у неё `null`. `cliVersionAtExport` — версия по semver из первой строки `<cli> --version` (таймаут 5 с; отдельное чтение: `cliVersion` в manager.ts меряет версию при создании запуска с таймаутом 20 с и отдаёт строку целиком): первое слово строки, подходящее под `^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$` (О7); не прочиталась или не распознана — `null`; сама первая строка, обрезанная до 128 знаков, — `cliVersionRaw` (`null`, если не прочиталась). Файлы пишутся **вне дерева проекта**: `<userData>/orchestration/runs/<runId>/export/review.json` (`board-review/v1`, публичная схема — T-15, F1) и `review.md` (то же для человека); абсолютные пути — в окне запуска с кнопкой «Скопировать путь». Loom не знает, как проект принимает работу. Включается `reviewExport: true` в профиле; требует `runBase` (иначе `review_export_needs_base`), поэтому `base` в выгрузке непустой, и `finish.commit` (иначе `review_export_needs_commit`): без коммита нет ни `commit`, ни `tree`. Запуск, завершённый с «нечего коммитить» (`runFinish`: шаг commit записал `finish.result` с `commit: null`), выгрузки не получает; панель запуска говорит «выгрузки нет: нечего было коммитить» — это читается из `finish` в `OrchestrationRunProgress` (шаг commit выполнен, `commit: null`), нового поля вида нет. Только worktree (`work_mode_not_worktree`) | тест: из фикстурного журнала v2 — `review.json` проходит схему (полный JSON Schema, T-15), у каждого поля источник назван (§8), каждое [П]-поле сверено с фикстурой; `commit` = коммит запуска, `tree` = `git rev-parse <commit>^{tree}`, `checkedTree` = `tree` записи `finish.result` шага commit — дерево проверенного снимка (различаются, когда `runFinish` оставил файлы — `leftOut`); `push`: завершённый запуск с push → `{remote, at, result: "confirmed"}`, в том числе после неизвестного исхода, выясненного `ls-remote`; без push (в цели нет `finish.push`) и при отказе человека (`person[step] === "decline"`) → `null`; находки со `severity`, `status`, `closedBy`, `downgraded`, включая закрытую человеком и пониженную (`wish` + `downgraded: true`); ревью лидом (`findingsView` = `null`) → `findings: []`; `executor`/`reviewer` с `provider`, `cli`, `model` (псевдоним из `goal.models`, без него `null`), `modelActual: null`, `cliVersionAtExport`, `cliVersionRaw`; первая строка `2.1.0 (Claude Code)` → `"2.1.0"` / `"2.1.0 (Claude Code)"`, `codex-cli 0.155.0` → `"0.155.0"` / `"codex-cli 0.155.0"`, строка без версии (`custom build`) → `null` / сама строка, строка длиннее 128 знаков → `cliVersionRaw` из 128; CLI недоступен или не ответил за 5 с → оба поля `null`, выгрузка записана; архивная задача — `title`/`issue` с доски; удалённая — `title: null`, `issue: null`, `ref` из цели; два завершённых запуска одной задачи → две выгрузки (по `runId`); одновременные вызовы по одному `runId` пишут один раз (single-flight); `scope` = `scope[]` задачи (нет — `null`); `review.md` содержит те же находки; цель без `goal.export` — выгрузки нет; запуск `failed` или остановленный с `goal.export` — выгрузки нет; повторный вызов с готовым `export/` ничего не пишет; падение между `completed` и записью (тест обрывает запись после временного каталога) → вызов при старте приложения дописывает файлы, недописанного `export/` не остаётся; `git status --porcelain --untracked-files=all` в worktree и в проекте одинаков до и после выгрузки; `reviewExport` в copy/project → `work_mode_not_worktree`, без `runBase` → `review_export_needs_base`, без `finish.commit` → `review_export_needs_commit`; запуск, завершённый с «нечего коммитить» (`commit: null`), — выгрузки нет, `export/` не создан; `branch` при `runBase` без шаблона = `canvastty/<run8>` из `goal.branch`; `evidence.command` берётся из решённой цели (`decidedGoal`): команда, решённая лидом или исправленная человеком, а не сырая `goal.commands`; `conditionsView` = `null` → `conditions: []`; поле `scope` в F1–F3 → `field_not_supported`, файл без `scope` снимает поле; проверка конвертером проекта — сторона проекта, `make review-import` — в Пробе (§11), не в тестах Loom | `findingsView`, `conditionsView` и `decidedGoal` (orchestrationService.ts), `closedByPerson` (src/shared/orchestration.ts), `CommitParams.tree` (finish.ts), запись `finish` журнала, `writeReviewExport` (reviewExport.ts, новый), `cliVersion` (manager.ts; образец), `saveProfile` (manager.ts), `parseGoal` | T-6, T-8, T-13b | M | **P0** | F4 |
 | **T-10** | Критерии обязательны: `criteria[]` из файла; у невнешней задачи без них — отказ `no_criteria`. Внешняя задача без критериев — T-3 (F2) | тест импорта: строка без `criteria` → `no_criteria` | `checkInput` (src/main/services/orchestration/boardStore.ts) | T-1 | S | **P0** | F1 |
 | **T-12** | Строка роли: `buildTask` первой строкой задания **всех** ролей пишет `[Raoden Loom] role: <lead\|executor\|reviewer>; task: <t>`, регулярка `^\[Raoden Loom\] role: (lead\|executor\|reviewer); task: ([A-Za-z0-9][A-Za-z0-9-]{0,31}\|-)$`; `<t>` = `goal.task.ref`, иначе `goal.task.key`, иначе у хода разбиения или запуска разрешения — `goal.decomposition.key` / `goal.resolution.key` (`ref` родителя из доски не берётся: в этих целях `ref` нет, а ключи `decomposition` и `resolution` строгие, `checkGoal` проверяет их точный набор; расширять их ради маркера нельзя — старая сборка читает журнал строго, §9), иначе `-` (запуск без задачи доски). Вторая строка остаётся прежней `Role: …`. Роли: ход разбиения — `lead` (E1), исполнитель и проверяющий запуска разрешения (C3) — `executor`/`reviewer`. `ref` приходит из `goal.task.ref`: `checkTask` принимает необязательный `ref` по регулярке §5.1, только в журнале v2; ставит main из доски, `parseGoal` из окна его не берёт (`taskRef` принимает только `{id, key}` — `invalid_argument`). По маркеру проект может узнать задание Loom — сторона проекта (пример — partnerkin, источник r7 §10.5): абзац для `AGENTS.md`. В `goal.text` не пишется | тест: строка 1 есть ровно один раз и первой в задании каждой роли (лид, исполнитель, проверяющий, разбиение, разрешение) и проходит регулярку; у задачи с `ref` — `task: T1`, без `ref` — ключ, без задачи — `-`, ход разбиения и запуск разрешения — `task: T-<n>` по `goal.decomposition.key` / `goal.resolution.key`; `taskText`, `commitMessage`, ветка и `commitTitle` её не содержат; `parseGoal` из окна `goal.task.ref` не принимает → `invalid_argument` | `buildTask`, `splitTask`, `checkTask`, `checkGoal` (src/main/services/orchestration/orchestrationService.ts), `parseGoal` (src/main/ipc/orchestrationIpc.ts), `resolveGoal` (manager.ts) | T-1 | S | **P0** | F1 |
-| **T-13a** | Профиль `runBase` и статусы места (Р1, режим worktree, путь `autopilotParallelStep`). Ключ профиля `runBase: {remote, branch, remoteUrl}` (значения — проекта; fixture — `upstream`/`stable`); `remoteUrl` main читает при сохранении профиля командой `git remote get-url --all <remote>` — той же, что проверка при запуске (с `insteadOf`; `gitRemotes` в profile.ts читает сырой `remote.<имя>.url` и для этого не годится); адрес не прочитан или адресов несколько разных — `remote_url_unreadable`; `runPush.remote` и `runBase.remote` могут различаться, у каждого свой `remoteUrl`. Режим copy или project с `runBase` → отказ профиля `remote_base_mode`. `runBase` входит в `fingerprint`. **Опции места и флаг `remoteBase`.** Объект опций вводит T-13a — раньше T-6. Для одного места это `PlaceOpts = { remoteBase?: boolean; issueRequired?: boolean }`: последний параметр `autopilotParallelStep` (существующие вызовы не меняются); `step` (boardAutopilot.ts) считает оба поля из профиля — `remoteBase = !!profile.runBase`, `issueRequired` = есть `{issue}` в `branchTemplate` (поле заполняет T-6; F4 добавляет `pushFields`, T-8) — и передаёт тот же объект в `boardStatuses`. Для всех мест сразу — вид доски: main добавляет в `BoardView` (`boardView` в manager.ts) поля `remoteBase: string[]` и `issueRequired: string[]` — ключи мест `workspaceId\0project` (так же, как `heads`); `boardStatuses(board, facts, heads, opts?: { remoteBase?: ReadonlySet<string>; issueRequired?: ReadonlySet<string> })` — те же два поля множествами ключей мест (место из `PlaceOpts` становится множеством из одного ключа). В таком месте итоги доски не читаются (`heads` игнорируются); зависимость засчитывается, только когда она «Готово» и её результат «в папке» (так у внешней задачи: `resultOf(undefined)`); **прямая зависимость невнешней задачи от обычной задачи** — причина `waits_mr` (карточка, main, окно и автопилот читают одну функцию — принцип 8); **внешняя задача** `waits_mr` не получает: она ждёт лишь «Готово» своих собственных зависимостей (условия «в папке» нет), «Выполнено» доступна, как только её зависимость «Готово» (О4). **Каждый вызов `boardStatuses` передаёт `opts`.** В src/main/services/orchestration/manager.ts: `mergeTask`, `mergeAll`, `startDecomposition`, `acceptTask`, три вызова в `taskOk`; в src/shared/taskBoard.ts: `autopilotStep` (режим «папка» с `runBase` запрещён — `opts` пуст, это записано комментарием) и `autopilotParallelStep`; в renderer: `useBoard` (src/renderer/src/features/orchestration/useBoard.ts) и `notify.ts` берут `view.remoteBase`. С `{ remoteBase: true }` в `autopilotParallelStep` приходит `head = null`: не возвращает `head`, `merge`, `agent`, `merge_wait`; зависимую от обычной задачи напрямую не стартует, без других дел — `others_wait`; старт — `{kind: "start", base: null}` (базу подставляет main, T-13b). `autoTakeOnDone(status, run, opts?)` в таком месте возвращает `null` (take после «Готово» нет, T-6) | тесты `autopilotParallelStep` с `{ remoteBase: true }`: нет итога — шаг `start`, не `head`, `head = null` принят; задача «Готово» — ни `take`, ни `merge`; зависимая от внешней `-MR` после отметки стартует, от обычной напрямую — нет (`waits_mr`, `others_wait`); цепочка P1 → P1-MR → P2 с `{ remoteBase: true }`: P1 «Готово» → `{kind: "wait", why: "external"}` (не `off`); после отметки `P1-MR` P2 стартует (`start`, `base: null`, свежий fetch — T-13b); сама `P1-MR` `waits_mr` не получает, «Выполнено» на ней доступна после «Готово» P1; `boardStatuses` с `remoteBase`: итоги не читаются, `waits_mr`; без `opts` результат прежний; тест вызовов: вид доски с `remoteBase` → `mergeTask`, `mergeAll`, `acceptTask`, `taskOk`, `useBoard` и `notify` видят одни статусы (`waits_mr`); `autoTakeOnDone` в месте `remoteBase` → `null`, иначе как сейчас; copy и project с `runBase` → `remote_base_mode` (не `work_mode_not_worktree`, §7.1); `remote_url_unreadable` на подставном git; смена `runBase` при включённом автопилоте → `settings_changed` | `autopilotParallelStep`, `autopilotStep`, `boardStatuses`, `autoTakeOnDone` (src/shared/taskBoard.ts), `BoardView` (там же), `boardView`, `saveProfile`, `mergeTask`, `mergeAll`, `startDecomposition`, `acceptTask`, `taskOk` (manager.ts), `useBoard`, `notify.ts` (renderer), `validateProfile` (profile.ts), `fingerprint` (src/main/services/orchestration/boardAutopilot.ts) | T-3 | M | **P0** | F3 |
+| **T-13a** | Профиль `runBase` и статусы места (Р1, режим worktree, путь `autopilotParallelStep`). Ключ профиля `runBase: {remote, branch, remoteUrl}` (значения — проекта; fixture — `upstream`/`stable`); `remoteUrl` main читает при сохранении профиля командой `git remote get-url --all <remote>` — той же, что проверка при запуске (с `insteadOf`; `gitRemotes` в profile.ts читает сырой `remote.<имя>.url` и для этого не годится); адрес не прочитан или адресов несколько разных — `remote_url_unreadable`; `runPush.remote` и `runBase.remote` могут различаться, у каждого свой `remoteUrl`. Режим copy или project с `runBase` → отказ профиля `remote_base_mode`. `runBase` входит в `fingerprint`. **Опции места и флаг `remoteBase`.** Объект опций вводит T-13a — раньше T-6. Для одного места это `PlaceOpts = { remoteBase?: boolean; issueRequired?: boolean }`: последний параметр `autopilotParallelStep` (существующие вызовы не меняются); `step` (boardAutopilot.ts) считает оба поля из профиля — `remoteBase = !!profile.runBase`, `issueRequired` = есть `{issue}` в `branchTemplate` (поле заполняет T-6; F4 добавляет `pushFields`, T-8) — и передаёт тот же объект в `boardStatuses`. Для всех мест сразу — вид доски: main добавляет в `BoardView` (`boardView` в manager.ts) поля `remoteBase: string[]` и `issueRequired: string[]` — ключи мест `workspaceId\0project` (так же, как `heads`); `boardStatuses(board, facts, heads, opts?: { remoteBase?: ReadonlySet<string>; issueRequired?: ReadonlySet<string> })` — те же два поля множествами ключей мест (место из `PlaceOpts` становится множеством из одного ключа). В таком месте итоги доски не читаются (`heads` игнорируются); зависимость засчитывается, только когда она «Готово» и её результат «в папке» (так у внешней задачи: `resultOf(undefined)`); **прямая зависимость невнешней задачи от обычной задачи** — причина `waits_mr` (карточка, main, окно и автопилот читают одну функцию — принцип 8); **внешняя задача** `waits_mr` не получает: она ждёт лишь «Готово» своих собственных зависимостей (условия «в папке» нет), «Выполнено» доступна, как только её зависимость «Готово» (О4). **Оговорка (ревью F3):** обычная задача, прямо зависящая от обычной задачи **другого** проекта, в месте `runBase` держится `waits_mr` навсегда (результат чужого проекта на этот remote не попадёт); выход — поставить между ними внешнюю задачу «-MR» и отметить её. **Каждый вызов `boardStatuses` передаёт `opts`.** В src/main/services/orchestration/manager.ts: `mergeTask`, `mergeAll`, `startDecomposition`, `acceptTask`, три вызова в `taskOk`; в src/shared/taskBoard.ts: `autopilotStep` (режим «папка» с `runBase` запрещён — `opts` пуст, это записано комментарием) и `autopilotParallelStep`; в renderer: `useBoard` (src/renderer/src/features/orchestration/useBoard.ts) и `notify.ts` берут `view.remoteBase`. С `{ remoteBase: true }` в `autopilotParallelStep` приходит `head = null`: не возвращает `head`, `merge`, `agent`, `merge_wait`; зависимую от обычной задачи напрямую не стартует, без других дел — `others_wait`; старт — `{kind: "start", base: null}` (базу подставляет main, T-13b). `autoTakeOnDone(status, run, opts?)` в таком месте возвращает `null` (take после «Готово» нет, T-6) | тесты `autopilotParallelStep` с `{ remoteBase: true }`: нет итога — шаг `start`, не `head`, `head = null` принят; задача «Готово» — ни `take`, ни `merge`; зависимая от внешней `-MR` после отметки стартует, от обычной напрямую — нет (`waits_mr`, `others_wait`); цепочка P1 → P1-MR → P2 с `{ remoteBase: true }`: P1 «Готово» → `{kind: "wait", why: "external"}` (не `off`); после отметки `P1-MR` P2 стартует (`start`, `base: null`, свежий fetch — T-13b); сама `P1-MR` `waits_mr` не получает, «Выполнено» на ней доступна после «Готово» P1; `boardStatuses` с `remoteBase`: итоги не читаются, `waits_mr`; без `opts` результат прежний; тест вызовов: вид доски с `remoteBase` → `mergeTask`, `mergeAll`, `acceptTask`, `taskOk`, `useBoard` и `notify` видят одни статусы (`waits_mr`); `autoTakeOnDone` в месте `remoteBase` → `null`, иначе как сейчас; copy и project с `runBase` → `remote_base_mode` (не `work_mode_not_worktree`, §7.1); `remote_url_unreadable` на подставном git; смена `runBase` при включённом автопилоте → `settings_changed` | `autopilotParallelStep`, `autopilotStep`, `boardStatuses`, `autoTakeOnDone` (src/shared/taskBoard.ts), `BoardView` (там же), `boardView`, `saveProfile`, `mergeTask`, `mergeAll`, `startDecomposition`, `acceptTask`, `taskOk` (manager.ts), `useBoard`, `notify.ts` (renderer), `validateProfile` (profile.ts), `fingerprint` (src/main/services/orchestration/boardAutopilot.ts) | T-3 | M | **P0** | F3 |
 | **T-13b** | База запуска — свежий remote (Р1). **Шаг автопилота** в `step` (boardAutopilot.ts) перед `goalFor`, в login shell пользователя: (1) проверка адресов fetch проверкой одних fetch-адресов `fetchUrlsMatch` (её вводит T-6) — `git remote get-url --all <remote>`, каждый адрес сверяется с `runBase.remoteUrl`; `remoteUrlLine`/`remoteUrlsMatch` для базы не годятся: они читают и адреса push, а `pushurl` к базе не относится — они остаются только для `runPush.remote`; (2) `git fetch <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>` (явный refspec) строкой login shell с `GIT_TERMINAL_PROMPT=0` (запроса пароля нет) и таймаутом 120 с; (3) `git rev-parse <remote>/<branch>^{commit}` → база `{branch: "<remote>/<branch>", commit, key: "remote"}`; worktree создаётся `createWorkspace from` этого коммита. **Кэш базы — только на ожидание старта одной задачи** (не на место): полученная база хранится, пока старт этой задачи ждёт `link_busy`, поэтому fetch не повторяется каждые 1,5 с. Кэш сбрасывается при создании запуска, при отметке внешней задачи («Выполнено» / «Снять отметку»), при смене `runBase` (отпечаток профиля) и при `raced` (`invalid_base` для `key: "remote"`). fetch упал или не ответил за 120 с — автопилот выключен `base_fetch_failed`, запуск не создан; адрес не тот — `base_remote_mismatch`; адрес не прочитан — `start_failed` с `remote_url_unreadable`. **`taskOk`** принимает базу `key: "remote"`, только если в профиле `runBase`, `branch` = `<remote>/<branch>`, а `commit` = текущему `rev-parse` этой remote-ветки в проекте (без нового fetch); итоги доски не читаются (`waits_head` и `task_not_ready` от итога не наступают); прямая зависимость от обычной задачи — `task_not_ready`. **Гонка** (другая ссылка сделала fetch между шагом и `taskOk`) → `invalid_base`, автопилот сбрасывает кэш базы и повторяет шаг: условие `raced` (в `step`) сейчас — только `next.base?.key === "T-0"`; оно расширяется на `key === "remote"` и сверяется с **фактической базой цели** (`goal.base.key`), а не с `next.base` шага. **`checkBase`** сейчас принимает ключ только `T-<n>` — его расширяют на `remote` (цель — журнал v2, фикстура F0, §9); без этого `invalid_base` от remote выключит автопилот `start_failed` | тесты `checkBase`: ключ `remote` принят, иной нечисловой — нет; тесты `taskOk`: база remote принята при совпадении коммита, иной коммит → `invalid_base`, существующий итог доски не даёт `task_not_ready`; проверка fetch-адресов: remote с `pushurl` ≠ `url` — проходит по `url` (`remoteUrlsMatch` на нём бы отказал), другой `url` → `base_remote_mismatch`; тест шага автопилота: `start` с базой `key: "remote"` вернул `invalid_base` → `pending` сброшен, автопилот включён, следующий шаг стартует, гонка проверяется по базе цели; кэш базы: пока старт ждёт `link_busy`, второй шаг без `git fetch`; отметка `-MR` («Выполнено») → fetch снова; два `invalid_base` подряд → fetch снова; после создания запуска следующий старт идёт с fetch; смена `runBase` → fetch снова; строка fetch содержит `GIT_TERMINAL_PROMPT=0` (подставной login shell); fetch дольше таймаута (подставной, срок задаётся в тесте, в коде 120 с) → `base_fetch_failed`; smoke: fixture bare-remote сдвинут между двумя стартами — вторая задача стартует от нового коммита; ref `refs/raoden/board/*` не создан; fetch упал или не отвечает (подставной git висит дольше таймаута) → автопилот выключен `base_fetch_failed`, запуск не создан; адрес remote не разрешённый → `base_remote_mismatch`; смена `runBase` в профиле → `settings_changed` | `step` и `fingerprint` (boardAutopilot.ts), `taskOk` (manager.ts), `checkBase` (orchestrationService.ts), `createWorkspace` (workspace.ts), `fetchUrlsMatch` (finish.ts, вводит T-6), `remoteUrlLine`/`remoteUrlsMatch` (там же; только для `runPush.remote`) | T-13a, T-6 | M | **P0** | F3 |
 | **T-13c** | Отказы в месте `remoteBase`. `mergeTask`, `mergeAll`, `ensureHead` отказывают `remote_base_mode` (итога доски там нет). **Разбиение выключено**: отметка «Разбить» отказана `remote_base_mode`, `decomposeCandidate` такую задачу пропускает, `startDecomposition` отказывает. **Старт задачи доски из диалога**: `taskOk` в месте `remoteBase` отказывает цель с `goal.task`, база которой не `key: "remote"`, — `remote_base_dialog` («в этом проекте задачи доски запускает автопилот»); свободные запуски (без `goal.task`) — как сейчас; база от remote для диалога вне F (§12); карточка показывает `waits_mr` | тесты: `mergeTask`/`mergeAll`/`ensureHead` → `remote_base_mode`; «Разбить» на задаче в таком месте → `remote_base_mode`, `decomposeCandidate` пропускает, `startDecomposition` отказывает; старт задачи из диалога (без базы или с базой `T-0`) → `remote_base_dialog`, запуск не создан; старт автопилотом (база `key: "remote"`) проходит; свободный запуск в этом проекте без `goal.task` создаётся; в месте без `runBase` ничего не изменилось | `mergeTask`, `mergeAll`, `startDecomposition`, `taskOk` (manager.ts), `ensureHead` (src/main/services/orchestration/boardMerge.ts), `decomposeCandidate` (src/shared/taskBoard.ts) | T-13a | S | **P0** | F3 |
 | **T-14** | Запуски без MCP (§7.5): опция профиля `runMcp: false`. Claude: `--strict-mcp-config` без `--mcp-config` (как старые режимы); проверка `system/init.mcp_servers` пуст — **новая точка в драйвере сессии Claude** (путь `buildNativeTurn`), не `checkProviderContract`; непустой список → пауза `needs_user_action` с деталью `mcp_present`. Codex (В6, вариант «в»): **без переопределения** — Loom не пишет `config` про MCP в `thread/start`/`thread/resume` (там остаётся прежний `config` доверия папки при `trustCwd`, A–E) и не трогает `~/.codex/config.toml`. Перед каждым ходом — `mcpServerStatus/list` **внутри потока** (с `threadId`), все страницы (`codexMcpList`, probe.ts), на всю проверку 30 с (О8; не срок пробы готовности). Правило **закрыто на отказ**: нет ответа за 30 с, ответ не разобран или список неполон (`codexMcpList` вернул `incomplete` ≠ `null`: `timeout`, `cli_exited`, `no_list`, `page_failed`, …) → пауза `needs_user_action`, деталь `mcp_unchecked`, ход не идёт. Правило **не использует `runtimeStatus`**: «включён» = сервер назван в полном ответе. Поля, которым отмечен выключенный сервер, `codexMcpList` (разбирает только страницы: `data`, `nextCursor`) и `codexMcpServers` (имя, `runtimeStatus`, `authStatus`, инструменты) не разбирают, кроме `runtimeStatus`, а его правило не берёт, — поэтому в счёт идёт каждый названный сервер [П — перечисляет ли Codex серверы, выключенные в его конфиге, покажет Проба]. Назван хоть один → пауза `needs_user_action`, деталь `mcp_present`, текст «у Codex включены MCP-серверы: <имена>; выключите их в своём конфиге Codex и нажмите «Продолжить»»; список полон и пуст → ход идёт. Готовность (`readiness`) применяет то же правило до старта: названные серверы — предупреждение `mcp_warning` с именами, нет ответа или список неполон — то же предупреждение с текстом «не проверено» (остановка — только в потоке) (`codexProjectLayer`, `codexMcpList`; сейчас `readiness` MCP Codex не читает — это добавляет T-14). Переопределение, проверенное на настоящем Codex, — §12 «После F». `runMcp` входит в `fingerprint` | тест аргументов: с опцией у Claude есть `--strict-mcp-config`, нет `--mcp-config`; без опции — как сейчас; init с непустым `mcp_servers` → пауза `needs_user_action`/`mcp_present`, не новая причина (`PAUSED_REASONS_V2` не меняется); тест Codex: `config` в `thread/start` и `thread/resume` не содержит ключей MCP (только прежний `projects.<cwd>.trust_level` при `trustCwd`); подставной Codex: любой названный сервер (в том числе с `runtimeStatus: "disabled"` — правило его не читает) → пауза `mcp_present` с именами в тексте, полный пустой список → ход идёт; нет ответа за 30 с, ошибка запроса, неполный список (нет `data`, повторяющийся курсор, вторая страница не ответила) → пауза `mcp_unchecked`, ход не выполнен; запрос идёт с `threadId`, читает все страницы; готовность: названные серверы → `mcp_warning` с теми же именами, нет ответа → `mcp_warning` «не проверено»; smoke на подставных CLI: аргументы Claude и запросы Codex дошли, пауза и предупреждение показаны; Проба: в `system/init.mcp_servers` лида и исполнителя (Claude) пусто, у проверяющего (Codex) паузы `mcp_present` нет | `buildNativeTurn` (аргументы Claude), `buildClaude`, `checkProviderContract` (только старые режимы) — src/main/services/orchestration/providers.ts; драйвер сессий и `trustCwd` в `thread/start` — src/main/services/orchestration/sessions.ts; `codexProjectLayer`, `codexReadiness`, `codexMcpList` — probe.ts; `readiness` (manager.ts) и её вызов в `step` (boardAutopilot.ts) | — | S | **P0** | F4 |
@@ -1621,7 +1621,237 @@ false`, `SHELL` — оболочка с журналом строк) и `window.
 
 ### F3 — база, ветка, коммит
 
-Не начат.
+Часть 1 — T-13a, T-6, T-7 (в этом порядке); часть 2 — T-13b, T-13c и smoke `scripts/smoke-board-f3-ui.mjs` (ниже, «Часть 2»).
+До части 2 автопилот в месте `runBase` стартовал задачу с `base: null` (worktree от HEAD проекта, без fetch), а итог доски,
+слияние и разбиение в таком месте не отказывались кодом `remote_base_mode` (их просто не делал автопилот).
+
+- **Профиль (T-13a, T-6).** `OrchestrationProjectProfile` получил `branchTemplate?` и `runBase?: {remote, branch, remoteUrl}`.
+  `validateProfile` (profile.ts): `validTemplate` — не worktree → `work_mode_not_worktree`; подстановка не из `{issue}`,
+  `{ref}`, `{run8}` → `branch_template_unknown`; нет `{ref}` и `{run8}`, литеральная часть вне `[A-Za-z0-9._/-]` или имя с
+  пробными значениями (`PROBE_FIELDS`: `ISSUE-1`, `T1`, `0123abcd`) не проходит `gitNameOk` (`GIT_NAME` без `..`) →
+  `branch_template_invalid`; `validRunBase` — имена по `gitNameOk`, не worktree → `remote_base_mode`. Пустой шаблон и
+  `runBase: null` — ключа нет. `saveProfile` (manager.ts): `git check-ref-format --branch` имени с пробными значениями
+  (`{ref}.lock` → `branch_template_invalid`); `runBase.remoteUrl` — `fetchUrlOf`: `git remote get-url --all <remote>`
+  (insteadOf раскрыт), не прочитан / ни одного / несколько разных → `remote_url_unreadable`; значение из окна
+  перезаписывается. `fingerprint` (boardAutopilot.ts, экспортирован) содержит `branchTemplate` и `runBase`: у профиля без
+  них строка та же, что до F3 (тест).
+- **Опции места (T-13a).** taskBoard.ts: `PlaceOpts = {remoteBase?, issueRequired?}`, `BoardOpts` (множества ключей мест),
+  `placeKey`, `placeOpts`, `boardOptsOf(view)`; boardAutopilot.ts: `placeOptsOf(profile)` (`remoteBase = !!runBase`,
+  `issueRequired` = `{issue}` в шаблоне). `BoardView.remoteBase?`/`issueRequired?` — ключи `workspaceId\0project` (только
+  непустые), заполняет `boardView` через `optsOf(tasks)` (профили проектов мест).
+  `boardStatuses(board, facts, heads, opts)`: в месте `remoteBase` итоги не читаются, зависимости — `remoteDependencies`:
+  не «Готово» → `waits_task`/`waits_external` как раньше; внешняя задача ждёт только «Готово» своих (О4, условия «в папке»
+  нет); невнешняя с «Готово» обычной зависимостью → `waits_mr` (и `depsWait.reason`). `issueRequired`: невнешняя задача
+  без `issue` в очереди без другой причины → `branch_template_field`. Без `opts` — прежний результат (тест). `opts`
+  передают все вызовы: manager.ts `mergeTask`, `mergeAll`, `startDecomposition`, `acceptTask`, три в `taskOk` (плюс
+  `begunOf` и `markExternal`); renderer `useBoard` и `splitNotes` (notify.ts, через `useRunNotifications`) —
+  `boardOptsOf(view)`; `autopilotStep` — без опций (комментарий: «папка» не берёт ни `runBase`, ни шаблон).
+  `autopilotParallelStep(…, splits, opts)`: при `remoteBase` `head = null` (шагов `head`, `merge`, `agent`, `merge_wait`
+  нет), `autoTakeOnDone(status, run, opts)` → `null` (take нет), старт `{kind: "start", base: null}`, `next` — по
+  `s.reason === null` и для задач с зависимостями; `branch_template_field` `next` пропускает всегда. `step`: при `runBase`
+  итог доски не читается (`deps.head` не вызывается), опции передаются последним параметром.
+- **Ветка (T-6).** `createRunFor`: после проверки существующего запуска и `taskOk` — `boardTaskOf` → `branchFor` →
+  `withBoardRef` → `resolveGoal` (ключ `branch` из входной цели отбрасывается). `branchFor` — только задача доски в worktree:
+  с шаблоном — `fillBranch` (`{ref}` без ref — ключ задачи), `{issue}` без issue → `branch_template_field`, имя не
+  проходит `gitNameOk`/`check-ref-format --branch` → `branch_invalid`, `main`/`master`/`runBase.branch` →
+  `protected_branch`, первое свободное из `<имя>`, `<имя>-2…-9` (локально `git show-ref --verify`, и не из занятых на
+  remote) → иначе `branch_taken`; без шаблона, но с `runBase` — `canvastty/<run8>`; иначе ключа нет. Занятость на remote —
+  `remoteBranchesTaken` в `startOn` до `canvas.startOnLink` (только при шаблоне и `runBase`, не для повтора созданного
+  запуска): `git remote get-url --all` и `fetchUrlsMatch` (новая, finish.ts: только fetch-адреса) с `runBase.remoteUrl`,
+  затем один `git ls-remote <remote> refs/heads/<имя> … refs/heads/<имя>-9` (20 с, `deps.remoteCheckMs` — только тесты;
+  `GIT_TERMINAL_PROMPT=0`); упал / не ответил → `remote_check_failed`; занятые имена — `remoteTaken` по `requestId`, в
+  идентичность запроса не входят, внутри очереди холста только локальная проверка. `checkGoal` принимает `goal.branch`
+  (журнал v2, worktree, `GIT_NAME` без `..`), `createWorkspace({branch})` создаёт ветку с этим именем (маркер её хранит);
+  появилась между проверкой и созданием — существующий `ref_conflict`, запуск `failed`. `parseGoal` ключ `branch` не знает
+  (`invalid_argument`, тест). Take: `takeState` у worktree с `goal.branch` предлагает имя запуска и берёт дерево
+  подтверждённого коммита запуска (не снимка) — `takeToBranch` коммита не добавляет и не переименовывает (тест с
+  `leftOut` ≠ ∅; без исправления падает).
+- **Коммит (T-7).** `commitMessage(text, runId, title?)` — `commitTitle` первой строкой, трейлер прежний; без него —
+  первая строка текста. `resolveGoal(…, t)` берёт `commitTitle` задачи доски (worktree и project). Отказ хука —
+  прежняя пауза `finish_unconfirmed` (деталь — прежняя, имя шага); в ленте — запись шага commit `failed` с выводом хука
+  (деталь `finish_failed` после ревью первого круга убрана, см. «Ревью первого круга»). `--no-verify` в строке коммита нет (тест).
+- **Импорт.** `issue` (`ISSUE`) и `commitTitle` (`isCommitTitle`: 1..72, не из пробелов, без управляющих знаков) приняты,
+  плохое значение — `invalid_task`; `LATER` — только `scope`; в store — мягкая проверка в `soft`; файл без поля снимает
+  его, тот же файл — `unchanged`.
+- **Окно.** Настройки проекта (дополнительно): поле «Шаблон имени ветки», «База запуска — ветка remote» (remote, ветка,
+  прочитанный адрес). Тексты §10 F3 RU/EN, плюс `projBranchTemplateHint`, `projRunBaseNone`, `projRunBaseBranch`,
+  `projRunBaseUrl`, `orchError_base_remote_mismatch`, `orchError_ref_conflict` (`boardStartAnywayWhy_waits_mr` после ревью убран).
+  `outcomeText` подставляет `{name}` (часть сообщения main после последнего «: ») и `{field}` = `issue`; карточка —
+  `{field}` в `boardReason_branch_template_field`.
+- **Тесты:** новый `tests/orchestration-board-f3.test.mjs` (22): чистые функции (`autopilotParallelStep` с
+  `{ remoteBase: true }`, `autoTakeOnDone`, `waits_mr`, цепочка P1 → P1-MR → P2, `branch_template_field` в
+  `boardStatuses`/`nextTask`/`next`, опции места, `fingerprint`), контроллер (смена `runBase` → `settings_changed`, итог не
+  читается), `validateProfile`, `fetchUrlsMatch`, `saveProfile` на временном репозитории с bare-remote (insteadOf,
+  `remote_url_unreadable` на подставном git, `check-ref-format`), manager (имя `ISSUE-1-T1`, ключ задачи, повтор,
+  запуск не по доске, отказы `branch_template_field`/`branch_invalid`/`protected_branch`, `invalid_argument` из IPC, `-2` от
+  локальной ветки и от ветки только на remote с порядком вызовов `ls-remote` → `worktree add`, `branch_taken`,
+  `remote_check_failed`, `base_remote_mismatch`, `ref_conflict`, `canvastty/<run8>` при `runBase`, принцип 8, take),
+  хук commit-msg fixture-репозитория (проходит по ветке, отказ → `finish_unconfirmed`), импорт, и автопилот на bare-remote:
+  T1 → T1-MR → T2 с шаблоном `{issue}-{ref}` — ветки `ISSUE-1-T1`, `ISSUE-1-T2`, коммиты с заголовками задач прошли хук,
+  итога доски и `refs/raoden/*` нет, take нет, ожидание `wait`/`external`, после отметки — `all_done`. В
+  `orchestration-board-import.test.mjs` и `orchestration-board-external.test.mjs` `field_not_supported` оставлен для `scope`.
+- **Проверки:** `npm test` — 2091 тест, 2090 прошли, 1 пропущен, 0 упало (`node --test --test-concurrency=1` десятью частями:
+  целиком прогон длиннее 10 минут лимита команды; флейков не было); `npm run typecheck` чист; `npm run lint:ci` — 267
+  предупреждений, как на main; `npm run build` прошёл. Прошлые smoke зелёные: `smoke-board-ui` 43/43, `smoke-board-f1-ui`
+  31/31, `smoke-board-f2-ui` 29/29 (36 подставных процессов), `smoke-board-e-ui` по сценариям `--only 1…4`: 14, 6, 11, 7.
+- **Отступления и решения (на утверждение владельцу):**
+  - `waits_mr` даёт **каждая** обычная «Готово» зависимость в месте `runBase` — и из другого проекта, и с результатом «в
+    папке» (запуск в папке, применённый результат): на remote его всё равно нет. В T-13a написано «засчитывается, только
+    когда … результат в папке»; принято строже.
+  - Адрес remote не совпал с `runBase.remoteUrl` при проверке в `startOn` (или его нет в профиле) — отказ старта
+    `base_remote_mismatch` (в §5.5 код — остановка автопилота T-13b); у автопилота это `start_failed` с этим кодом.
+  - `git remote get-url` и `git ls-remote` в `startOn` — `execFile` программы git с окружением login shell проекта и
+    `GIT_TERMINAL_PROMPT=0`, не строкой login shell.
+  - Защищённые имена (`main`, `master`, ветка `runBase`) сверяются для **каждого** кандидата (база и `-2…-9`) без учёта
+    регистра (APFS): защищённая база — `protected_branch`, защищённый кандидат с суффиксом пропускается (ревью первого круга;
+    до него сверялось только базовое имя с учётом регистра).
+  - `branch_template_field` — причина только задачи в очереди без иной причины; внешняя задача её не получает.
+  - Деталь `finish_failed` не вводится (отступление от T-7, §5.5, §10, f3.s6): журнал паузы детали не хранит, формат журнала
+    не меняем; правка cycle.ts и ключ `orchError_finish_failed` убраны после ревью первого круга. Отказ хука виден паузой
+    `finish_unconfirmed`, статусом шага коммита `failed` и выводом хука в ленте.
+  - Текст `orchError_invalid_argument` не заменён (код общий для всех неверных аргументов IPC).
+  - Шаблон действует и на старт задачи доски из диалога (worktree); `goal.finish.push.branch` — с F4 (`runPush`).
+  - Поля `BoardView.remoteBase`/`issueRequired` необязательные и пишутся только непустыми (старые чтения вида не меняются).
+- **Готово для T-13b/T-13c:** `fetchUrlsMatch` (finish.ts), `fetchUrlOf` (manager.ts), `placeOptsOf`, `optsOf`,
+  `remoteDependencies`; в `step` место для fetch перед `goalFor` (сейчас `next.base = null`); `raced` пока только `T-0`;
+  `checkBase` ключ `remote` ещё не принимает; `taskOk` базу `key: "remote"` не знает; `remote_base_mode` для `mergeTask`,
+  `mergeAll`, `ensureHead`, «Разбить», `startDecomposition` и `remote_base_dialog` — отказов нет (текст есть только у `remote_base_mode`).
+
+**Часть 2 — T-13b, T-13c, smoke.**
+
+- **База от remote (T-13b).** manager.ts `remoteBase(project)`: `git remote get-url --all <remote>` (окружение login shell
+  проекта, `GIT_TERMINAL_PROMPT=0`) → `fetchUrlsMatch` с `runBase.remoteUrl` (не прочитан — `remote_url_unreadable`, не тот —
+  `base_remote_mismatch`); `GIT_TERMINAL_PROMPT=0 git fetch --no-tags '<remote>' '+refs/heads/<branch>:refs/remotes/<remote>/<branch>'`
+  строкой login shell (`runShell`, 120 с, `deps.baseFetchMs` — только тесты; упал или не ответил → `base_fetch_failed`);
+  `git rev-parse --verify refs/remotes/<remote>/<branch>^{commit}` → `{branch: "<remote>/<branch>", commit, key: "remote"}`.
+  Автопилот получает её зависимостью `remoteBase`. `step` (boardAutopilot.ts) в месте `remoteBase` берёт базу после сверки
+  отпечатка профиля и до `goalFor`. Кэш (О3) — `Live.base`: задача, отметки внешних задач места и база; тот же старт той же
+  задачи (ожидание `link_busy`/`folder_busy`, готовность «занято») идёт без fetch; другая задача или другая отметка
+  («Выполнено», «Снять отметку») — fetch; сброс при создании запуска, при `raced` и при перерешении после `task_not_ready`;
+  смена `runBase` — `settings_changed` до fetch, новое включение — новый fetch. Отказы: `base_fetch_failed` и
+  `base_remote_mismatch` — остановки с этими кодами (новые значения `AutopilotStopCode`), остальное (`remote_url_unreadable`) —
+  `start_failed` с кодом в детали. `raced` смотрит на базу цели `goal.base.key` (`T-0` или `remote`) с `invalid_base` или
+  `task_active_run`; при `remote` кэш сбрасывается.
+- **`taskOk` и `checkBase`.** База `key: "remote"` принимается, только если в профиле `runBase`, `branch` = `<remote>/<branch>`
+  и `commit` = текущему `rev-parse` ветки remote в проекте (без fetch); иначе `invalid_base`. Итоги доски не читаются:
+  зависимости — `boardStatuses` с опциями места (`waits_mr`, `waits_task` → `task_not_ready`); `anyway` снимает только эту
+  проверку. `checkBase` (orchestrationService.ts, экспортирована для теста) принимает ключ `T-<n>` или `remote` (журнал v2,
+  copy/worktree). Worktree — `createWorkspace({from: commit})`, путь C2. IPC (`baseRef`) по-прежнему пускает только `T-<n>`:
+  окно базу remote прислать не может. Ref `refs/raoden/board/*` в месте `runBase` не создаётся.
+- **Отказы (T-13c).** `remote_base_mode`: `mergeTask`, `mergeAll` (до чтения итога), «Разбить» — `boardUpdate` и
+  `boardCreate` с `decompose: true`, `startDecomposition`; boardMerge.ts — `ensureHead` и `newHead` по новой зависимости
+  `remoteBase(project)` (профиль с `runBase`). `decomposeCandidate(…, opts)` при `remoteBase` возвращает `null` (вызов из
+  `autopilotParallelStep`). Форма задачи: «Разбить на подзадачи» недоступна в месте с `runBase` (подсказка —
+  `orchError_remote_base_mode`). `remote_base_dialog`: `taskOk` отказывает цель с `goal.task` в месте `remoteBase` без базы
+  `remote`; та же проверка — в `startOn` до очереди старта. Свободные запуски (без `goal.task`) — как раньше.
+- **Тексты:** `boardApStop_base_fetch_failed`, `boardApStop_base_remote_mismatch`, `orchError_remote_base_dialog` (RU/EN, §10)
+  и лишний `orchError_base_fetch_failed` (тест «у каждого кода main есть текст»).
+- **Тесты** — в `tests/orchestration-board-f3.test.mjs` (теперь 31): `checkBase` (`remote` принят, иной нечисловой ключ — нет,
+  только v2); кэш на подставных зависимостях (`link_busy` — второй шаг без fetch, после создания запуска — fetch, «Выполнено» и
+  «Снять отметку» — fetch); гонка (`invalid_base` с базой цели `remote` — автопилот включён, pending и кэш сброшены; два подряд —
+  fetch каждый раз, затем старт; иной отказ — `start_failed`); смена `runBase` → `settings_changed`, новое включение — fetch;
+  отказы `remoteBase` → остановки; manager на bare-remote: строка fetch в подставном login shell (`GIT_TERMINAL_PROMPT=0`,
+  явный refspec), `pushurl` ≠ `url` проходит по `url`, база — сдвинутый коммит remote, коммит запуска на нём, `refs/raoden`
+  нет; отказы fetch (упал; висит дольше `baseFetchMs` = 1 с → `base_fetch_failed`; иной адрес → `base_remote_mismatch`;
+  `get-url` не прочитан → `start_failed`/`remote_url_unreadable`), запусков нет; `taskOk` (`remote` без `runBase`, чужой коммит,
+  чужая ветка → `invalid_base`; верная база — без fetch, worktree от коммита базы; итог доски, сделанный до `runBase`, не
+  мешает, новых ref нет); T-13c (`boardMerge`, `boardMergeAll`, `boardHeadNew`, «Разбить» правкой и созданием, `boardDecompose`
+  → `remote_base_mode`; `decomposeCandidate` с опцией и без; диалог без базы и с базой `T-0` → `remote_base_dialog`, запуска
+  нет; свободный запуск создан; `ensureHead` boardMerge; без `runBase` — как раньше); тексты. Тесты части 1 поправлены: старт
+  задачи доски в месте `runBase` теперь с базой `remote` (`remoteRef`), `mergeAll` там — `remote_base_mode` вместо `no_head`.
+- **Smoke** `scripts/smoke-board-f3-ui.mjs` — 40/40 (66 подставных процессов CLI, ни одной модели; 8 fetch): fixture-проект с
+  bare-remote `upstream` (ветка `stable`), хуками pre-commit (пишет журнал) и commit-msg (нейтральный: `ISSUE-1` в сообщении
+  или ветке), профиль по образцу §7.6 (worktree, `{issue}-{ref}`, `upstream/stable`), подставной login shell пишет свои строки,
+  его `git fetch` по флагу падает или висит.
+  - f3.s1 — `{ref}` сохранён; без `{ref}`/`{run8}`, с `..`, с пробелом — `branch_template_invalid`; `{foo}` —
+    `branch_template_unknown`; copy — `work_mode_not_worktree`.
+  - f3.s2 — `runBase` сохранён, адрес прочитан main (`profile()`); copy и project — `remote_base_mode`; смена `runBase`, пока
+    автопилот ждёт отметки, — `settings_changed` до fetch и старта.
+  - f3.s3 — свободный запуск создан (план показан, затем остановлен); диалоговый старт T1 (вызов окна) — `remote_base_dialog`
+    при занятом месте, запуска нет; «Разбить» (main) — `remote_base_mode`, в форме флажок недоступен с подсказкой; T1-MR —
+    `waits_task`, после «Готово» T1 без `waits_mr`, «Выполнено» доступна; автопилот ждёт (`wait`/`external`); D1, зависящая
+    прямо от T2, — `waits_mr` на карточке, автопилот — `others_wait`.
+  - f3.s4 — T1 на `ISSUE-1-T1` от коммита remote, коммит с заголовком задачи прошёл оба хука; ref итога, слияний и take нет;
+    remote сдвинут, после отметки T1-MR старт с новым fetch, T2 на `ISSUE-1-T2` от сдвинутого коммита; после «Готово» имена те
+    же; каждая строка fetch — `GIT_TERMINAL_PROMPT=0 git fetch --no-tags 'upstream' '+refs/heads/stable:refs/remotes/upstream/stable'`.
+  - f3.s5 — `ISSUE-1-T3` только на remote — запуск на `ISSUE-1-T3-2`; всё до `-9` занято — `start_failed`/`branch_taken`, запуска нет.
+  - f3.s6 — commit-msg отказал (`ISSUE-2-T5`) — пауза `finish_unconfirmed`, не «Готово», автопилот `run_paused`; ни в одной
+    строке login shell нет `--no-verify`.
+  - f3.s7 — fetch упал — `base_fetch_failed`, текст в окне; fetch висит — `base_fetch_failed` через настоящие 120 с; иной
+    адрес — `base_remote_mismatch`; запусков нет; `pushurl` ≠ `url` при верном `url` — база взята (запуск T7).
+  - f3.s8 — T6 без `issue` (её зависимость X1 отмечена) — `branch_template_field` на карточке, автопилот её пропускает, берёт T7
+    и не останавливается на T6 (после T7 — `others_wait` из-за D1).
+  - f3.s9 — профиль без новых ключей: worktree `canvastty/<run8>`, в цели нет `branch`, база — итог доски (`T-0`), fetch нет;
+    take — ветка `raoden/…`, итог доски создан и слияние завершено, `all_done`.
+- **Проверки:** `npm test` — 2100 тестов, 2099 прошли, 1 пропущен, 0 упало (`node --test --test-concurrency=1` десятью
+  частями: целиком прогон длиннее 10 минут лимита команды). В первом прогоне частей упали два теста от собственных правок, не
+  флейки: тест части 1 про `ls-remote` (после проверки `remote_base_dialog` в `startOn` ему нужна база `remote`) и
+  `orchestration-renderer-model` (нет текста `orchError_base_fetch_failed` — добавлен); после правок оба файла прогнаны снова
+  — зелёные. `npm run typecheck` чист; `npm run lint:ci` — 267 предупреждений, как на main; `npm run build` прошёл. Smoke после
+  сборки: `smoke-board-f3-ui` 40/40, `smoke-board-ui` 43/43, `smoke-board-f1-ui` 31/31, `smoke-board-f2-ui` 29/29,
+  `smoke-board-e-ui` по сценариям `--only 1…4`: 14, 6, 11, 7.
+- **Отступления и решения (на утверждение владельцу):**
+  - Кэш базы привязан к задаче и к отметкам внешних задач места (сравнение, а не событие отметки): поэтому он сбрасывается и
+    при «Снять отметку», и при перерешении после `task_not_ready`.
+  - `git fetch` — с `--no-tags` (в спецификации нет): метки remote не попадают в репозиторий проекта.
+  - `git remote get-url` и `rev-parse` — `execFile` программы git с окружением login shell; строкой login shell идёт только
+    `git fetch` (как `ls-remote` в части 1 — `execFile`).
+  - `remote_base_dialog` проверяется и в `startOn` до очереди старта: иначе при занятых местах диалоговый старт вставал в
+    очередь и отказывался позже (нашёл smoke).
+  - `newHead` («Начать новый итог доски») тоже отказывает `remote_base_mode`: ref итога в месте `runBase` не создаётся ничем.
+  - «Разбить» при создании задачи (`boardCreate` с `decompose`) — тоже `remote_base_mode`. Задача, отмеченная до появления
+    `runBase`, отметку сохраняет; автопилот её не разбивает и не стартует, разбиение — `remote_base_mode`.
+  - Smoke: f3.s1–f3.s2 — вызовом `saveProfile` окна (тот же, что у формы настроек), показ адреса — через `profile()`;
+    диалоговый старт — вызов `startOnLink`, как f2.s4; `ls-remote` до замка холста, `ref_conflict`, `remote_check_failed` и
+    кэш при `link_busy` — только тесты (git приложения в smoke не подменить; запуск worktree связь не занимает); в smoke —
+    один fetch на старт и новый fetch после отметки. У T8 (f3.s9) заголовок коммита с `ISSUE-1`: хук fixture требует его и
+    при ветке `canvastty/…`.
+
+**Ревью первого круга (диф main..feat/f3-base).**
+
+- **Кэш базы (О3).** `step` сбрасывает `Live.base` сразу после шага, если шаг не `start` или задача другая — во всех ветках,
+  включая ранние `return` (ожидание лимита, человека, слоты). До правки кэш жил, пока шаги возвращали не `start`, и та же
+  задача потом стартовала от старой базы. Тест: старт ждёт `link_busy` → шаг `wait` (слот занят другим запуском места) → тот
+  же старт — fetch повторён.
+- **`branch_template_field` в шаге.** `next` в `autopilotParallelStep` и `nextTask` (новый необязательный `opts`) проверяют
+  признак по самой задаче: `issueRequired && !issue` — не брать, независимо от `s.reason`. До правки задача с зависимостями,
+  чей статус нёс иную причину (`waits_merge`: одна зависимость «в папке», другая в итоге), стартовала без `issue` и
+  останавливала автопилот `start_failed`. Тест на это расхождение статуса и шага.
+- **`ls-remote` при повторе.** Кэш убран: `remoteTaken` по `requestId` живёт только на один старт и сбрасывается в `finally`;
+  автопилот повторяет старт с новым `requestId`, ожидание занятости ловит readiness `busy` до `ls-remote`. Тест: два `link_busy` — два `ls-remote`.
+- **«Делать целиком» при ожидании зависимости.** В месте `remoteBase` задача с `decompose`, поставленная до `runBase` (unsplit, колонка очереди), показывает «Делать целиком» независимо от `depsWait`.
+- **ssh под таймаутом.** `execFile` по таймауту убивает git, но не его ssh: `ls-remote` и `git fetch` (строка login shell; её
+  остаток и так добирает супервизор) получают `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=2"` (без запроса пароля, отказ соединения за 15 с, молчащий сервер — за
+  30 с), только если у пользователя нет своих `GIT_SSH_COMMAND`, `GIT_SSH` в окружении login shell и `core.sshCommand`
+  (`git config --get` в проекте) — его настройка не трогается. `get-url` ssh не запускает. Выбран env, а не `runShell` с
+  группой процессов: сохраняет `execFile` и коды отказов, ssh сам ограничивает время. Тест на подставном git: значение
+  передано; с `core.sshCommand` — не передано. `GIT_SSH_COMMAND` с `ConnectTimeout=15` и `ServerAlive*` перекрывает эти ключи из `~/.ssh/config` пользователя (на jump-хост через `ProxyJump` опции `-o` не передаются); если пользователь задал свой `GIT_SSH_COMMAND`/`GIT_SSH`/`core.sshCommand` — переменная не ставится.
+- **Защищённые имена.** Каждый кандидат, без учёта регистра (см. «Отступления» части 1). Тест: ветка `runBase`
+  `issue-1-t1-2` — кандидат `ISSUE-1-T1-2` пропущен, запуск на `ISSUE-1-T1-3`; `{ref}` = `MAIN` → `protected_branch`.
+- **Адрес при сохранении.** `fetchUrlOf` читает `get-url` в окружении login shell проекта (`deps.native`, direnv —
+  сохраняемого профиля), как проверки старта (`loginGitEnv`). Тест: `insteadOf` только в `GIT_CONFIG_GLOBAL` окружения
+  подставного shell — сохранён раскрытый адрес, старт проходит.
+- **`finish_failed`** убран (cycle.ts как на main, ключа `orchError_finish_failed` нет) — отступление записано в части 1.
+- **Карточка.** В месте `runBase` «Запустить» и «Запустить всё равно» выключены с подсказкой `orchError_remote_base_dialog`;
+  недостижимый `boardStartAnywayWhy_waits_mr` убран (тест ключей `depsWait` его и не требовал). Задача, отмеченная «Разбить»
+  до появления `runBase`: строка карточки — `orchError_remote_base_mode` вместо «не начата», вместо «Разбить» —
+  «Делать целиком» (снимает отметку). Smoke f3.s3: кнопка «Запустить» T1 выключена с подсказкой.
+- **`merges.merge`** (boardMerge.ts, `begin`, первым шагом в очереди места) — `noRemoteBase`: слияние, начатое до `runBase`,
+  в месте `runBase` не продолжается (`remote_base_mode`). Тест в T-13c.
+- **Оговорка** о `waits_mr` на обычную задачу другого проекта — в T-13a.
+- **Тесты:** `tests/orchestration-board-f3.test.mjs` — 36 (+5: кэш при шаге wait, расхождение статуса и шага, `link_busy`
+  с ssh-окружением, защищённые кандидаты, адрес в окружении shell; T-13c дополнен `merges.merge`). Все новые проверки падают
+  без правок (проверено откатом src).
+- **Проверки:** `npm test` — 2105 тестов, 2104 прошли, 1 пропущен, 0 упало (`node --test --test-concurrency=1` десятью
+  частями; флейков не было); `npm run typecheck` чист; `npm run lint:ci` — 267 предупреждений, как на main; `npm run build`
+  прошёл. Smoke после сборки: `smoke-board-f3-ui` 41/41 (66 подставных процессов CLI, 8 fetch), `smoke-board-ui` 43/43,
+  `smoke-board-f2-ui` 29/29.
+- **Утверждено владельцем 2026-10-22 (PR #88):** `waits_mr` от любой обычной «Готово» зависимости, в том числе с
+  результатом «в папке»; `git fetch --no-tags` для базы; отказ `remote_base_dialog` до очереди старта; «Разбить»
+  отказано и при создании, задаче с отметкой до `runBase` — «Делать целиком»; `GIT_SSH_COMMAND` с BatchMode,
+  ConnectTimeout=15 и ServerAlive для `ls-remote` и fetch, только без своей команды ssh человека. Остальные пункты
+  «на утверждение владельцу» выше остаются открытыми.
 
 ### F4 — push, MR, ревью, MCP
 

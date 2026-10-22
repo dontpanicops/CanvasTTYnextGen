@@ -51,6 +51,9 @@ test("the parent's card by each row of §2.1: the column, the words and the acti
   // waiting for its own dependencies: nothing to press yet; a subtask and an unmarked task have none
   const waits = rowOf([], { dependsOn: ["3"] }, [task("3")]);
   assert.deepEqual(splitActions(waits.parent, waits.st), []);
+  // F3: at a remote base «Do it whole» shows while a dependency waits; without it, as before
+  assert.deepEqual(splitActions(waits.parent, waits.st, true), ["whole"]);
+  assert.deepEqual(splitActions(waits.parent, waits.st, false), []);
   assert.deepEqual(splitActions({ decompose: undefined }, waits.st), []);
   assert.deepEqual(splitActions({ decompose: true, parentId: "1" }, waits.st), []);
   assert.deepEqual([unsplit(task("1", { decompose: true }), {}), unsplit(task("1", { decompose: true }), { split: { runId: "r", detail: "whole" } }), unsplit(task("1", { decompose: true, decomposedBy: "r" }), {})], [true, false, false]);

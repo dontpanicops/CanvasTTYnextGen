@@ -240,6 +240,31 @@ export function ProjectSettings({ locale, linkId, info, onSaved, onCancel, check
           {qa.verify.trim() && !qa.reportsVersion && <small className="orch-hint" data-orch-qa-unverified>{t(locale, "orchSettingsQaUnverified")}</small>}
           <small className="orch-hint">{t(locale, "orchSettingsQaHint")} {t(locale, "orchSettingsQaNeedsCommit")}</small>
         </fieldset>
+        {/* F3 (stage-f-external-projects.md §10): the board's tasks in a worktree — the branch name, the remote base; main
+            refuses them in another mode (work_mode_not_worktree, remote_base_mode) and reads the remote's address */}
+        <fieldset className="orch-field" data-orch-settings-branches>
+          <label className="orch-field">
+            <span>{t(locale, "projBranchTemplate")}</span>
+            <input value={p.branchTemplate ?? ""} spellCheck={false} placeholder="{ref}" data-orch-settings-branch-template
+              onChange={(e) => setP((cur) => { const { branchTemplate: _was, ...rest } = cur; return e.target.value ? { ...rest, branchTemplate: e.target.value } : rest; })} />
+            <small className="orch-hint">{t(locale, "projBranchTemplateHint")}</small>
+          </label>
+          <label className="orch-field">
+            <span>{t(locale, "projRunBase")}</span>
+            <span className="orch-field__row">
+              <select value={p.runBase?.remote ?? ""} data-orch-settings-run-base-remote
+                onChange={(e) => setP((cur) => { const { runBase: _was, ...rest } = cur; return e.target.value ? { ...rest, runBase: { remote: e.target.value, branch: cur.runBase?.branch ?? "", remoteUrl: null } } : rest; })}>
+                <option value="">{t(locale, "projRunBaseNone")}</option>
+                {info.facts.remotes.map((r) => <option key={r.name} value={r.name}>{r.name} — {r.url}</option>)}
+              </select>
+              {p.runBase && (
+                <input value={p.runBase.branch} placeholder={t(locale, "projRunBaseBranch")} data-orch-settings-run-base-branch
+                  onChange={(e) => set({ runBase: { ...p.runBase!, branch: e.target.value } })} />
+              )}
+            </span>
+            {p.runBase?.remoteUrl && <small className="orch-hint" data-orch-settings-run-base-url>{t(locale, "projRunBaseUrl")}: <code>{p.runBase.remoteUrl}</code></small>}
+          </label>
+        </fieldset>
         <fieldset className="orch-field" data-orch-settings-grants>
           <legend>{t(locale, "orchSettingsGrants")}</legend>
           {p.grants.length === 0 ? <p className="orch-hint">{t(locale, "orchSettingsGrantsNone")}</p> : (

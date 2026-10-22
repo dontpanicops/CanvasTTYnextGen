@@ -4,7 +4,7 @@
 import { useState } from "react";
 import type { LocaleId, SessionBounds } from "../../../../shared/contracts";
 import type { OrchestrationAgentLink } from "../../../../shared/orchestration";
-import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, externalInForce, isCopy, startBase, taskText, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type ImportReport, type InboxRow, type InboxTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
+import { AUTOPILOT_BUDGET, type AutopilotLimit, conflictsOf, placeKey, externalInForce, isCopy, startBase, taskText, mergeMark, parallelOf, type AutopilotBudget, type AutopilotState, type BoardHead, type BoardMerge, type BoardTask, type ImportReport, type InboxRow, type InboxTask, type RunTaskFacts, type TaskColumn, type TaskStatus } from "../../../../shared/taskBoard";
 import { t, type TranslationKey } from "../../lib/i18n";
 import { Dialog } from "./OrchestrationDialogs";
 import { ACTIVE_STATUSES, providerName, resetTime } from "./runModel";
@@ -169,9 +169,12 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                   // what is asked, in the request's own words and the CLI's reason (answered in the run panel: one home for answers)
                   // F2: an external task in force — the person's mark is what it waits for, never a run
                   const external = externalInForce(task, st);
+                  // F3 (T-13c): a place at a remote base — its tasks are started by the autopilot, no split there
+                  const remote = !!view?.remoteBase?.includes(placeKey(task));
+                  const splitOff = remote && unsplit(task, st) && st.column === "queue" && !st.reason;
                   const depsOpen = task.dependsOn.some((d) => tasks.some((x) => x.id === d) && !board.statuses.get(d)?.done);
                   const line = st.reason === "waits_permission" ? permissionLine(locale, base, (lineId ? orch.runs[lineId] : undefined)?.view.permission)
-                    : external && !st.done && !st.reason ? t(locale, "boardExternalWaits") : base;
+                    : external && !st.done && !st.reason ? t(locale, "boardExternalWaits") : splitOff ? t(locale, "orchError_remote_base_mode") : base;
                   // without checks, the conditions are met by the agents' word only
                   const met = run ? conditionsLine(locale, run.view) : null;
                   // shown once the run's feed is here: «0» before it loads would be a guess
@@ -196,7 +199,8 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                   const queued = view?.queued?.find((q) => q.taskId === task.id);
                   const overlaps = board.overlaps.get(task.id) ?? [];
                   // E4 (§10): a parent's row of §2.1, its subtasks; a subtask's parent
-                  const acts = splitActions(task, st);
+                  // F3: at a remote base no split is started — «Do it whole» takes the mark off
+                  const acts = remote ? [...new Set(splitActions(task, st, true).map((a) => (a === "run" || a === "again" ? "whole" : a)))] : splitActions(task, st);
                   const subs = view ? subtaskInfo(task, tasks, board.statuses, view.facts, view.heads ?? []) : null;
                   const parent = task.parentId ? tasks.find((x) => x.id === task.parentId) : undefined;
                   return (
@@ -293,8 +297,8 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
                                 title={depsOpen ? t(locale, "orchError_deps_not_done") : undefined} onClick={() => { setNote(""); setMarking(task.id); }}>{t(locale, "boardExternalDone")}</button>}
                               {external && st.done && <button type="button" data-board-external-undo onClick={() => void markAct(task, false)}>{t(locale, "boardExternalUndo")}</button>}
                               {!external && (st.column === "queue" || st.reason === "no_checks") && st.reason !== "run_newer" && !(queued && !queued.failed) && !unsplit(task, st) && (st.depsWait
-                                ? <button type="button" data-board-start-anyway onClick={() => setAnyway(task.id)}>{t(locale, "boardStartAnyway")}</button>
-                                : <button type="button" data-board-start onClick={() => start(task)}>{t(locale, st.attempts ? "boardStartAgain" : "boardStart")}</button>)}
+                                ? <button type="button" data-board-start-anyway disabled={remote} title={remote ? t(locale, "orchError_remote_base_dialog") : undefined} onClick={() => setAnyway(task.id)}>{t(locale, "boardStartAnyway")}</button>
+                                : <button type="button" data-board-start disabled={remote} title={remote ? t(locale, "orchError_remote_base_dialog") : undefined} onClick={() => start(task)}>{t(locale, st.attempts ? "boardStartAgain" : "boardStart")}</button>)}
                               {/* E4: the actions of a parent's row (§2.1); «Stop» is the split run's panel's */}
                               {acts.includes("run") && <button type="button" className="orch-primary" data-board-decompose onClick={() => void splitAct(task, "decompose")}>{t(locale, "boardDecomposeRun")}</button>}
                               {acts.includes("again") && <button type="button" className="orch-primary" data-board-decompose-again onClick={() => void splitAct(task, "decompose")}>{t(locale, "boardDecomposeAgain")}</button>}
@@ -337,7 +341,7 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
         </Dialog>
       )}
       {form && (
-        <TaskForm locale={locale} task={form.task} splitLocked={!!form.task && ((board.statuses.get(form.task.id)?.attempts ?? 0) > 0 || tasks.some((x) => x.parentId === form.task!.id && !x.archivedAt))} tasks={tasks.filter((x) => !x.archivedAt)} projects={projects}
+        <TaskForm locale={locale} task={form.task} remoteBase={(project) => !!view?.remoteBase?.includes(placeKey({ workspaceId: form.task?.workspaceId ?? workspaceId, project }))} splitLocked={!!form.task && ((board.statuses.get(form.task.id)?.attempts ?? 0) > 0 || tasks.some((x) => x.parentId === form.task!.id && !x.archivedAt))} tasks={tasks.filter((x) => !x.archivedAt)} projects={projects}
           dependents={form.task ? tasks.filter((x) => x.dependsOn.includes(form.task!.id)) : []}
           onClose={() => setForm(null)}
           onSave={async (input) => {
@@ -359,8 +363,9 @@ export function BoardCard(props: BoardCardProps): React.JSX.Element {
 }
 
 // «New task» / «Edit task»: the goal's fields without a start (§6). main checks the rest (lengths, cycles, the folder).
-function TaskForm({ locale, task, splitLocked, tasks, projects, dependents, onClose, onSave, onDelete }: {
-  locale: LocaleId; task: BoardTask | null; splitLocked: boolean; tasks: BoardTask[]; projects: string[]; dependents: BoardTask[]; onClose(): void;
+// remoteBase (F3, T-13c): the project's place takes its base from a remote branch — no «Split» there (remote_base_mode)
+function TaskForm({ locale, task, remoteBase, splitLocked, tasks, projects, dependents, onClose, onSave, onDelete }: {
+  locale: LocaleId; task: BoardTask | null; remoteBase(project: string): boolean; splitLocked: boolean; tasks: BoardTask[]; projects: string[]; dependents: BoardTask[]; onClose(): void;
   onSave(input: { project: string; title: string; text: string; criteria: string[]; dependsOn: string[]; decompose: boolean }): Promise<string | null>;
   // dependents: the tasks shown as losing this dependency (§4.2: removed openly, never on the quiet)
   onDelete?: (dependents: string[]) => Promise<string | null>;
@@ -397,7 +402,8 @@ function TaskForm({ locale, task, splitLocked, tasks, projects, dependents, onCl
           <input data-board-field="project" value={project} list="board-projects" disabled={!!task} onChange={(e) => setProject(e.target.value)} />
           <datalist id="board-projects">{projects.map((p) => <option key={p} value={p} />)}</datalist></label>
         {/* E4 (§10): not for a subtask; not while the task has its own run or live subtasks */}
-        {!task?.parentId && <label className="orch-field orch-field--check"><input type="checkbox" data-board-field="decompose" checked={decompose} disabled={splitLocked}
+        {!task?.parentId && <label className="orch-field orch-field--check" title={remoteBase(project.trim()) && !task?.decompose ? t(locale, "orchError_remote_base_mode") : undefined}>
+          <input type="checkbox" data-board-field="decompose" checked={decompose} disabled={splitLocked || (remoteBase(project.trim()) && !task?.decompose)}
           onChange={(e) => setDecompose(e.target.checked)} /> {t(locale, "boardDecompose")}</label>}
         {(
           <fieldset className="orch-field board-form__depends"><legend>{t(locale, "boardFieldDepends")}</legend>

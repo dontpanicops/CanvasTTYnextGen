@@ -83,6 +83,8 @@ export interface GoalInput {
   // B4 (owner's decision 11), journal v2 and a separate copy only: the copy starts from this commit — the result branch
   // of the task `key` this run's task depends on — instead of the project's working folder
   base?: { branch: string; commit: string; key: string };
+  // F3 (T-6), journal v2 and a worktree only: the worktree's branch, chosen by main (never from the window: parseGoal)
+  branch?: string;
   // C3, journal v2 rules in a resolution run's journal: the merge run it resolves for (stage-c3-conflicts.md §3)
   resolution?: { mergeRunId: string; taskId: string; key: string; base: string };
   // E1, journal v2 rules in a decomposition run's journal: the parent task it splits (stage-e-decomposition.md §3.1)
@@ -540,6 +542,9 @@ function checkGoal(input: GoalInput, registryOf: (commands: string[] | null) => 
   if (input.language !== undefined && input.language !== "ru" && input.language !== "en") bad("language must be ru or en");
   const task = input.task === undefined ? undefined : checkTask(input.task, v2, bad);
   const base = input.base === undefined ? undefined : checkBase(input.base, v2, input.workMode, bad);
+  // F3 (T-6): the name as checkFinish takes a branch; main chose it (git's check-ref-format included)
+  if (input.branch !== undefined && (typeof input.branch !== "string" || !/^(?!-)[A-Za-z0-9._/-]{1,200}$/.test(input.branch) || input.branch.includes("..")
+    || !v2 || input.workMode !== "worktree")) bad("branch: a branch name, journal v2 and a worktree only");
   const resolution = input.resolution === undefined ? undefined : checkResolution(input, v2, bad);
   const decomposition = input.decomposition === undefined ? undefined : checkDecomposition(input, v2, bad);
   if (resolution && decomposition) bad("resolution and decomposition exclude each other");
@@ -564,7 +569,7 @@ function checkGoal(input: GoalInput, registryOf: (commands: string[] | null) => 
     ...(input.mode ? { mode: input.mode } : {}), ...(prepare ? { prepare } : {}), ...(finish ? { finish } : {}),
     ...(input.access ? { access: { claude: input.access.claude, codex: input.access.codex } } : {}),
     ...(models ? { models } : {}), ...(input.language ? { language: input.language } : {}), ...(task ? { task } : {}),
-    ...(base ? { base } : {}), ...(resolution ? { resolution } : {}), ...(decomposition ? { decomposition } : {})
+    ...(base ? { base } : {}), ...(input.branch !== undefined ? { branch: input.branch } : {}), ...(resolution ? { resolution } : {}), ...(decomposition ? { decomposition } : {})
   };
 }
 
@@ -614,12 +619,13 @@ export function resolutionPlan(goal: Pick<Goal, "text" | "criteria" | "language"
 
 // B4: a base for a separate copy (C2: or a worktree) — a branch of the project and the commit it named when the run was asked for (the
 // commit is what the copy starts from: a branch moved later changes nothing here)
-function checkBase(b: unknown, v2: boolean, workMode: GoalInput["workMode"], bad: (m: string) => never): { branch: string; commit: string; key: string } {
+export function checkBase(b: unknown, v2: boolean, workMode: GoalInput["workMode"], bad: (m: string) => never): { branch: string; commit: string; key: string } {
   const o = b as Record<string, unknown> | null;
   if (!o || typeof o !== "object" || Array.isArray(o) || Object.keys(o).some((k) => !["branch", "commit", "key"].includes(k))) bad("base must be { branch, commit, key }");
   if (typeof o!.branch !== "string" || !/^[A-Za-z0-9._\/-]{1,200}$/.test(o!.branch) || o!.branch.includes("..")) bad("base.branch must be a branch name");
   if (typeof o!.commit !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(o!.commit)) bad("base.commit must be a full commit id");
-  if (typeof o!.key !== "string" || !/^T-\d{1,6}$/.test(o!.key)) bad("base.key must be T-<n>");
+  // F3 (T-13b): "remote" — the autopilot's base at the profile's runBase (the remote branch fetched for the start)
+  if (typeof o!.key !== "string" || !/^(T-\d{1,6}|remote)$/.test(o!.key)) bad("base.key must be T-<n> or remote");
   if (!v2) bad("base: recorded only in a journal v2 goal");
   if (workMode !== "copy" && workMode !== "worktree") bad("base: a separate copy or a worktree only"); // C2: a worktree too
   return { branch: o!.branch as string, commit: o!.commit as string, key: o!.key as string };
@@ -716,7 +722,7 @@ export function createOrchestrationService(deps: OrchestrationDeps) {
         ...(goal.resolution ? { kind: "resolution" as const } : goal.decomposition ? { kind: "decomposition" as const } : {}), io: deps.storeIo });
       let ws: Workspace;
       try {
-        ws = await createWorkspace({ root: deps.root, runId, source: input.source, gitPath: deps.gitPath, mode: goal.workMode ?? "copy",
+        ws = await createWorkspace({ root: deps.root, runId, source: input.source, gitPath: deps.gitPath, mode: goal.workMode ?? "copy", ...(goal.branch ? { branch: goal.branch } : {}),
           ...(goal.base ? { from: goal.base.commit } : goal.resolution ? { from: goal.resolution.base } : goal.decomposition ? { from: goal.decomposition.base } : {}) });
         await writer.recordWorkspaceCreated({
           sourcePathSha256: createHash("sha256").update(ws.sourcePath).digest("hex"),
